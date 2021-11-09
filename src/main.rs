@@ -13,8 +13,8 @@ use typed_arena::Arena;
 enum DwpError {
     #[error("compilation unit with dwo id has no dwo name")]
     DwoIdWithoutDwoName,
-    #[error("compilation unit with dwo id doesn't normalize to dwo id")]
-    DwoIdAttributeNormalizeWrong,
+    #[error("missing compilation unit die")]
+    MissingUnitDie,
 }
 
 #[derive(Debug, StructOpt)]
@@ -83,25 +83,16 @@ fn load_file_section<'input, 'arena>(
 /// compilation unit that contains the debuginfo) or split compilation unit (identifying the
 /// skeleton unit that this debuginfo corresponds to). In earlier DWARF versions with GNU extension,
 /// `DW_AT_GNU_dwo_id` attribute of the DIE contains the `DwoId`.
-fn dwo_id_of_die<R: gimli::Reader>(
-    unit: &gimli::Unit<R>,
-    die: &gimli::DebuggingInformationEntry<'_, '_, R>,
-) -> Result<Option<gimli::DwoId>> {
+fn dwo_id_of_unit<R: gimli::Reader>(unit: &gimli::Unit<R>) -> Option<gimli::DwoId> {
     match unit.header.type_() {
         // DWARF 5
         gimli::UnitType::Skeleton(dwo_id) | gimli::UnitType::SplitCompilation(dwo_id) => {
-            Ok(Some(dwo_id))
+            Some(dwo_id)
         }
         // GNU Extension (maybe!)
-        gimli::UnitType::Compilation => match die.attr_value(gimli::DW_AT_GNU_dwo_id)? {
-            Some(gimli::AttributeValue::DwoId(dwo_id)) => Ok(Some(dwo_id)),
-            // If there isn't a `DwoId` then this isn't a relevant compilation unit to dwp.
-            None => return Ok(None),
-            // If there is a `DW_AT_GNU_dwo_id` that doesn't normalize to a `DwoId`.
-            _ => return Err(anyhow!(DwpError::DwoIdAttributeNormalizeWrong)),
-        },
+        gimli::UnitType::Compilation => unit.dwo_id,
         // Wrong compilation unit type.
-        _ => Ok(None),
+        _ => None,
     }
 }
 
@@ -111,30 +102,36 @@ fn dwo_id_of_die<R: gimli::Reader>(
 /// compilation unit will contain a `DW_AT_dwo_name` attribute with the name of the dwarf object
 /// file containing the split compilation unit with the `DwoId`. In earlier DWARF
 /// versions with GNU extension, `DW_AT_GNU_dwo_name` attribute contains name.
-fn dwo_id_and_path_of_die<R: gimli::Reader>(
+fn dwo_id_and_path_of_unit<R: gimli::Reader>(
     dwarf: &gimli::Dwarf<R>,
     unit: &gimli::Unit<R>,
-    die: &gimli::DebuggingInformationEntry<'_, '_, R>,
 ) -> Result<Option<(gimli::DwoId, PathBuf)>> {
-    let dwo_id = if let Some(dwo_id) = dwo_id_of_die(unit, die)? {
+    let dwo_id = if let Some(dwo_id) = dwo_id_of_unit(unit) {
         dwo_id
     } else {
         return Ok(None);
     };
 
-    let dwo_name = if let Some(val) = die.attr_value(gimli::DW_AT_dwo_name)? {
-        // DWARF 5
-        val
-    } else if let Some(val) = die.attr_value(gimli::DW_AT_GNU_dwo_name)? {
-        // GNU Extension
-        val
-    } else {
-        return Err(anyhow!(DwpError::DwoIdWithoutDwoName));
+    let dwo_name = {
+        let mut cursor = unit.header.entries(&unit.abbreviations);
+        cursor.next_dfs()?;
+        let root = cursor.current().ok_or(anyhow!(DwpError::MissingUnitDie))?;
+
+        let dwo_name = if let Some(val) = root.attr_value(gimli::DW_AT_dwo_name)? {
+            // DWARF 5
+            val
+        } else if let Some(val) = root.attr_value(gimli::DW_AT_GNU_dwo_name)? {
+            // GNU Extension
+            val
+        } else {
+            return Err(anyhow!(DwpError::DwoIdWithoutDwoName));
+        };
+
+        dwarf
+            .attr_string(&unit, dwo_name)?
+            .to_string()?
+            .into_owned()
     };
-    let dwo_name = dwarf
-        .attr_string(&unit, dwo_name)?
-        .to_string()?
-        .into_owned();
 
     // Prepend the compilation directory if it exists.
     let mut dwo_path = if let Some(comp_dir) = &unit.comp_dir {
@@ -145,42 +142,6 @@ fn dwo_id_and_path_of_die<R: gimli::Reader>(
     dwo_path.push(dwo_name);
 
     Ok(Some((dwo_id, dwo_path)))
-}
-
-/// Helper enum returned by the operation passed to `with_each_die` so that the closure can
-/// manage the control flow of the loop in the calling function.
-enum WithEachControlFlow {
-    /// `continue`
-    Continue,
-    /// `break`
-    #[allow(dead_code)]
-    Break,
-}
-
-/// Iterate over each debug information entry in an object, invoking a closure to perform an
-/// operation on each.
-fn with_each_die<Reader, Op>(dwarf: &gimli::Dwarf<Reader>, mut op: Op) -> Result<()>
-where
-    Reader: gimli::Reader,
-    Op: FnMut(
-        &gimli::Dwarf<Reader>,
-        &gimli::Unit<Reader>,
-        &gimli::DebuggingInformationEntry<Reader>,
-    ) -> Result<WithEachControlFlow>,
-{
-    let mut iter = dwarf.units();
-    while let Some(header) = iter.next()? {
-        let unit = dwarf.unit(header)?;
-        let abbreviations = dwarf.abbreviations(&unit.header)?;
-        let mut entry_cursor = unit.header.entries(&abbreviations);
-        while let Some((_, die)) = entry_cursor.next_dfs()? {
-            match op(&dwarf, &unit, &die)? {
-                WithEachControlFlow::Continue => continue,
-                WithEachControlFlow::Break => break,
-            }
-        }
-    }
-    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -204,18 +165,15 @@ fn main() -> Result<()> {
     {
         let _guard = span!(Level::TRACE, "read dwarf objects from executable");
         let exec_dwarf = gimli::Dwarf::load(&mut load_section)?;
-        with_each_die(&exec_dwarf, |dwarf, unit, die| {
-            if die.tag() != gimli::DW_TAG_compile_unit {
-                return Ok(WithEachControlFlow::Continue);
-            }
+        let mut iter = exec_dwarf.units();
+        while let Some(header) = iter.next()? {
+            let unit = exec_dwarf.unit(header)?;
 
-            if let Some((dwo_id, path)) = dwo_id_and_path_of_die(&dwarf, &unit, &die)? {
+            if let Some((dwo_id, path)) = dwo_id_and_path_of_unit(&exec_dwarf, &unit)? {
                 println!("dwo id: {:#x}, dwo path: {:?}", dwo_id.0, path);
                 dwos.push((dwo_id, path));
             }
-
-            Ok(WithEachControlFlow::Continue)
-        })?;
+        }
     }
 
     for (target_dwo_id, path) in dwos {
@@ -231,19 +189,16 @@ fn main() -> Result<()> {
         };
 
         let dwo_dwarf = gimli::Dwarf::load(&mut load_dwo_section)?;
-        with_each_die(&dwo_dwarf, |_dwarf, unit, die| {
-            if die.tag() != gimli::DW_TAG_compile_unit {
-                return Ok(WithEachControlFlow::Continue);
-            }
+        let mut iter = dwo_dwarf.units();
+        while let Some(header) = iter.next()? {
+            let unit = dwo_dwarf.unit(header)?;
 
-            if let Some(dwo_id) = dwo_id_of_die(&unit, &die)? {
+            if let Some(dwo_id) = dwo_id_of_unit(&unit) {
                 if target_dwo_id == dwo_id {
                     println!("found dwo id: {:#x}", dwo_id.0);
                 }
             }
-
-            Ok(WithEachControlFlow::Continue)
-        })?;
+        }
     }
 
     Ok(())
