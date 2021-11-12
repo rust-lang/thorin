@@ -1,3 +1,4 @@
+use crate::relocate::{add_relocations, Relocate, RelocationMap};
 use anyhow::{anyhow, Context, Result};
 use object::{Object, ObjectSection};
 use std::borrow::{Borrow, Cow};
@@ -9,12 +10,22 @@ use tracing::{span, trace, Level};
 use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
 use typed_arena::Arena;
 
+mod relocate;
+
 #[derive(Debug, Error)]
 enum DwpError {
     #[error("compilation unit with dwo id has no dwo name")]
     DwoIdWithoutDwoName,
     #[error("missing compilation unit die")]
     MissingUnitDie,
+    #[error("section without name at offset 0x{0:08x}")]
+    SectionWithoutName(usize),
+    #[error("relocation with invalid symbol for section {0} at offset 0x{1:08x}")]
+    RelocationWithInvalidSymbol(String, usize),
+    #[error("multiple relocations for section {0} at offset 0x{1:08x}")]
+    MultipleRelocations(String, usize),
+    #[error("unsupported relocation for section {0} at offset 0x{1:08x}")]
+    UnsupportedRelocation(String, usize),
 }
 
 #[derive(Debug, StructOpt)]
@@ -53,12 +64,15 @@ fn runtime_endian_of_object<'a>(obj: &object::File<'a>) -> gimli::RunTimeEndian 
 
 /// Loads a section of a file from `object::File` into a `gimli::EndianSlice`. Expected to be
 /// curried using a closure and provided to `Dwarf::load`.
+#[tracing::instrument(level = "trace", skip(file, arena_data, arena_relocations))]
 fn load_file_section<'input, 'arena>(
     id: gimli::SectionId,
     file: &object::File<'input>,
     is_dwo: bool,
     arena_data: &'arena Arena<Cow<'input, [u8]>>,
-) -> Result<gimli::EndianSlice<'arena, gimli::RunTimeEndian>> {
+    arena_relocations: &'arena Arena<RelocationMap>,
+) -> Result<Relocate<'arena, gimli::EndianSlice<'arena, gimli::RunTimeEndian>>> {
+    let mut relocations = RelocationMap::default();
     let name = if is_dwo {
         id.dwo_name()
     } else {
@@ -66,15 +80,25 @@ fn load_file_section<'input, 'arena>(
     };
 
     let data = match name.and_then(|name| file.section_by_name(&name)) {
-        Some(ref section) => section.uncompressed_data()?,
+        Some(ref section) => {
+            if !is_dwo {
+                add_relocations(&mut relocations, file, section)?;
+            }
+            section.uncompressed_data()?
+        }
         // Use a non-zero capacity so that `ReaderOffsetId`s are unique.
         None => Cow::Owned(Vec::with_capacity(1)),
     };
+
     let data_ref = (*arena_data.alloc(data)).borrow();
-    Ok(gimli::EndianSlice::new(
-        data_ref,
-        runtime_endian_of_object(file),
-    ))
+    let reader = gimli::EndianSlice::new(data_ref, runtime_endian_of_object(file));
+    let section = reader;
+    let relocations = (*arena_relocations.alloc(relocations)).borrow();
+    Ok(Relocate {
+        relocations,
+        section,
+        reader,
+    })
 }
 
 /// Returns the `DwoId` of a DIE.
@@ -157,8 +181,10 @@ fn main() -> Result<()> {
     let obj = load_object_file(&arena_mmap, &opt.executable)?;
 
     let arena_data = Arena::new();
-    let mut load_section =
-        |id: gimli::SectionId| -> Result<_, _> { load_file_section(id, &obj, false, &arena_data) };
+    let arena_relocations = Arena::new();
+    let mut load_section = |id: gimli::SectionId| -> Result<_, _> {
+        load_file_section(id, &obj, false, &arena_data, &arena_relocations)
+    };
 
     let mut dwos = Vec::new();
 
@@ -185,7 +211,7 @@ fn main() -> Result<()> {
         );
         let dwo_obj = load_object_file(&arena_mmap, &path)?;
         let mut load_dwo_section = |id: gimli::SectionId| -> Result<_, _> {
-            load_file_section(id, &dwo_obj, true, &arena_data)
+            load_file_section(id, &dwo_obj, true, &arena_data, &arena_relocations)
         };
 
         let dwo_dwarf = gimli::Dwarf::load(&mut load_dwo_section)?;
