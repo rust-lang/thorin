@@ -7,9 +7,10 @@ edition = "2021"
 anyhow = "1.0.45"
 gimli = "0.26.1"
 memmap2 = "0.5.0"
-object = "0.27.1"
+object = { version  = "0.27.1", features = [ "read", "write", "compression" ] }
 structopt = "0.3.25"
 thiserror = "1.0.30"
 tracing = "0.1.29"
-tracing-subscriber = { version = "0.3.1", features = [ "env-filter" ] }
+tracing-subscriber = { version = "0.2.25", features = [ "env-filter" ] }
+tracing-tree = "0.1.10"
 typed-arena = "2.0.1"

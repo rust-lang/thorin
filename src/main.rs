@@ -3,11 +3,13 @@ use anyhow::{anyhow, Context, Result};
 use object::{Object, ObjectSection};
 use std::borrow::{Borrow, Cow};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use structopt::StructOpt;
 use thiserror::Error;
 use tracing::{span, trace, Level};
-use tracing_subscriber::{fmt::format::FmtSpan, EnvFilter};
+use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
+use tracing_tree::HierarchicalLayer;
 use typed_arena::Arena;
 
 mod relocate;
@@ -169,10 +171,16 @@ fn dwo_id_and_path_of_unit<R: gimli::Reader>(
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
-        .with_env_filter(EnvFilter::from_env("RUST_DWP_LOG"))
-        .init();
+    let subscriber = Registry::default()
+        .with(EnvFilter::from_env("RUST_DWP_LOG"))
+        .with(
+            HierarchicalLayer::default()
+                .with_writer(io::stderr)
+                .with_indent_lines(true)
+                .with_targets(true)
+                .with_indent_amount(2),
+        );
+    tracing::subscriber::set_global_default(subscriber).unwrap();
 
     let opt = Opt::from_args();
     trace!(?opt);
