@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.45"
 gimli = "0.26.1"
-memmap = "0.7.0"
+memmap2 = "0.5.0"
 object = "0.27.1"
 structopt = "0.3.25"
 thiserror = "1.0.30"

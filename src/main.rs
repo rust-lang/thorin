@@ -28,13 +28,13 @@ struct Opt {
 /// Load and parse an object file.
 #[tracing::instrument(level = "trace", skip(arena_mmap))]
 fn load_object_file<'input, 'arena>(
-    arena_mmap: &'arena Arena<memmap::Mmap>,
+    arena_mmap: &'arena Arena<memmap2::Mmap>,
     path: &'input Path,
 ) -> Result<object::File<'arena>> {
     let file = fs::File::open(&path)
         .with_context(|| format!("failed to open object file at {}", path.display()))?;
 
-    let mmap = (unsafe { memmap::Mmap::map(&file) })
+    let mmap = (unsafe { memmap2::Mmap::map(&file) })
         .with_context(|| format!("failed to map file at {}", path.display()))?;
 
     let mmap_ref = (*arena_mmap.alloc(mmap)).borrow();
