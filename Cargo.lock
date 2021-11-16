@@ -103,6 +103,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "gimli",
+ "indexmap",
  "memmap2",
  "object",
  "structopt",

@@ -1,19 +1,25 @@
 use crate::relocate::{add_relocations, Relocate, RelocationMap};
 use anyhow::{anyhow, Context, Result};
-use gimli::{DebugAddr, DwoId, EndianSlice, RunTimeEndian, UnitType};
+use gimli::{
+    write::{EndianVec, Writer},
+    DebugAddr, DebugStrOffset, DebugStrOffsetsBase, DebugStrOffsetsIndex, DwarfFileType, DwoId,
+    EndianSlice, Format, Reader, RunTimeEndian, UnitType,
+};
+use indexmap::IndexSet;
 use memmap2::Mmap;
 use object::{
     write::{self, SectionId, StreamingBuffer},
     Architecture, BinaryFormat, Endianness, Object, ObjectSection, SectionKind,
 };
 use std::borrow::{Borrow, Cow};
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use structopt::StructOpt;
 use thiserror::Error;
-use tracing::trace;
+use tracing::{debug, trace};
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
 use tracing_tree::HierarchicalLayer;
 use typed_arena::Arena;
@@ -40,6 +46,10 @@ enum DwpError {
     DwarfObjectMissingSection(String),
     #[error("failed to create output file")]
     FailedToCreateOutputFile,
+    #[error("dwarf object has no units")]
+    DwarfObjectWithNoUnits,
+    #[error("str offset value out of range of entry size")]
+    DwpStrOffsetOutOfRange,
 }
 
 /// In-progress DWARF package output being produced.
@@ -54,6 +64,10 @@ struct DwpOutputObject<'file> {
     debug_loclists: SectionId,
     /// Identifier for the `.debug_rnglists.dwo` section in the object file being created.
     debug_rnglists: SectionId,
+    /// Identifier for the `.debug_str.dwo` section in the object file being created.
+    debug_str: SectionId,
+    /// Identifier for the `.debug_str_offsets.dwo` section in the object file being created.
+    debug_str_offsets: SectionId,
 }
 
 /// A DWARF object referenced by input object.
@@ -77,6 +91,68 @@ impl fmt::Debug for TargetDwarfObject {
                 .to_str()
                 .expect("target dwarf object filename has invalid unicode")
         )
+    }
+}
+
+/// New-type'd index from `IndexVec` of strings inserted into the `.debug_str` section.
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+struct DwpStringId(usize);
+
+/// DWARF packages need to merge the `.debug_str` sections of input DWARF objects.
+/// `.debug_str_offsets` sections then need to be rebuilt with offsets into the new merged
+/// `.debug_str` section and then concatenated (indices into each dwarf object's offset list will
+/// therefore still refer to the same string).
+///
+/// Gimli's `StringTable` produces a `.debug_str` section with a single `.debug_str_offsets`
+/// section, but `DwpStringTable` accumulates a single `.debug_str` section and can be used to
+/// produce multiple `.debug_str_offsets` sections (which will be concatenated) which all offset
+/// into the same `.debug_str`.
+struct DwpStringTable<E: gimli::Endianity> {
+    debug_str: gimli::write::DebugStr<EndianVec<E>>,
+    strings: IndexSet<Vec<u8>>,
+    offsets: HashMap<DwpStringId, DebugStrOffset>,
+}
+
+impl<E: gimli::Endianity> DwpStringTable<E> {
+    /// Create a new `DwpStringTable` with a given endianity.
+    fn new(endianity: E) -> Self {
+        Self {
+            debug_str: gimli::write::DebugStr(EndianVec::new(endianity)),
+            strings: IndexSet::new(),
+            offsets: HashMap::new(),
+        }
+    }
+
+    /// Insert a string into the string table and return its offset in the table. If the string is
+    /// already in the table, returns its offset.
+    fn get_or_insert<T: Into<Vec<u8>>>(&mut self, bytes: T) -> Result<DebugStrOffset> {
+        let bytes = bytes.into();
+        assert!(!bytes.contains(&0));
+        let (index, is_new) = self.strings.insert_full(bytes.clone());
+        let index = DwpStringId(index);
+        if !is_new {
+            return Ok(*self
+                .offsets
+                .get(&index)
+                .expect("insert exists but no offset"));
+        }
+
+        // Keep track of the offset for this string, it might be referenced by the next compilation
+        // unit too.
+        let offset = self.debug_str.offset();
+        self.offsets.insert(index, offset);
+
+        // Insert into the string table.
+        self.debug_str.write(&bytes)?;
+        self.debug_str.write_u8(0)?;
+
+        Ok(offset)
+    }
+
+    /// Write the accumulated `.debug_str` section to an object file, returns the offset of the
+    /// section in the object.
+    fn write<'file>(self, obj: &mut write::Object<'file>, section: SectionId) -> u64 {
+        obj.append_section_data(section, &self.debug_str.0.into_vec(), 1)
     }
 }
 
@@ -233,10 +309,7 @@ fn parse_executable<'input, 'arena: 'input>(
     obj: &object::File<'input>,
     arena_data: &'arena Arena<Cow<'input, [u8]>>,
     arena_relocations: &'arena Arena<RelocationMap>,
-) -> Result<(
-    gimli::read::DebugAddr<DwpReader<'arena>>,
-    Vec<TargetDwarfObject>,
-)> {
+) -> Result<(DebugAddr<DwpReader<'arena>>, Vec<TargetDwarfObject>)> {
     let mut dwarf_objects = Vec::new();
 
     let mut load_section = |id: gimli::SectionId| -> Result<_> {
@@ -279,6 +352,8 @@ fn create_output_object<'file>(
     let debug_line = add_section(gimli::SectionId::DebugLine);
     let debug_loclists = add_section(gimli::SectionId::DebugLocLists);
     let debug_rnglists = add_section(gimli::SectionId::DebugRngLists);
+    let debug_str = add_section(gimli::SectionId::DebugStr);
+    let debug_str_offsets = add_section(gimli::SectionId::DebugStrOffsets);
 
     Ok(DwpOutputObject {
         obj,
@@ -286,18 +361,105 @@ fn create_output_object<'file>(
         debug_line,
         debug_loclists,
         debug_rnglists,
+        debug_str,
+        debug_str_offsets,
     })
+}
+
+/// Read the string offsets from `.debug_str_offsets.dwo` in the DWARF object, adding each to the
+/// in-progress `.debug_str` (`DwpStringTable`) and building a new `.debug_str_offsets.dwo` to be
+/// the current DWARF object's contribution to the DWARF package.
+#[tracing::instrument(level = "trace", skip(dwo_obj, dwo_dwarf, string_table, output))]
+fn append_debug_str_offset<'input, 'output, 'arena: 'input, Endian: gimli::Endianity>(
+    dwo_obj: &object::File<'input>,
+    dwo_dwarf: &gimli::Dwarf<DwpReader<'arena>>,
+    string_table: &mut DwpStringTable<Endian>,
+    output: &mut DwpOutputObject<'output>,
+) -> Result<u64> {
+    let mut data = EndianVec::new(runtime_endian_of_object(dwo_obj));
+
+    let root_header = dwo_dwarf
+        .units()
+        .next()?
+        .context(DwpError::DwarfObjectWithNoUnits)?;
+    let encoding = root_header.encoding();
+    let base = DebugStrOffsetsBase::default_for_encoding_and_file(encoding, DwarfFileType::Dwo);
+
+    let section_name = gimli::SectionId::DebugStrOffsets.dwo_name().unwrap();
+    let section = dwo_obj
+        .section_by_name(section_name)
+        .with_context(|| DwpError::DwarfObjectMissingSection(section_name.to_string()))?;
+    let section_size = section.size();
+
+    let entry_size = match encoding.format {
+        Format::Dwarf32 => 4,
+        Format::Dwarf64 => 8,
+    };
+
+    debug!(
+        ?section_size,
+        str_offset_size_num_elements = section_size / entry_size
+    );
+    for i in 0..(section_size / entry_size) {
+        let dwo_index = DebugStrOffsetsIndex(i as usize);
+        let dwo_offset =
+            dwo_dwarf
+                .debug_str_offsets
+                .get_str_offset(encoding.format, base, dwo_index)?;
+        let dwo_str = dwo_dwarf.debug_str.get_str(dwo_offset)?;
+        let dwo_str = dwo_str.to_string()?;
+
+        let dwp_offset = string_table.get_or_insert(dwo_str.as_ref())?;
+        debug!(
+            ?i,
+            ?dwo_str,
+            "dwo_offset={:#x} dwp_offset={:#x}",
+            dwo_offset.0,
+            dwp_offset.0
+        );
+
+        match encoding.format {
+            Format::Dwarf32 => {
+                data.write_u32(
+                    dwp_offset
+                        .0
+                        .try_into()
+                        .context(DwpError::DwpStrOffsetOutOfRange)?,
+                )?;
+            }
+            Format::Dwarf64 => {
+                data.write_u64(
+                    dwp_offset
+                        .0
+                        .try_into()
+                        .context(DwpError::DwpStrOffsetOutOfRange)?,
+                )?;
+            }
+        }
+    }
+
+    Ok(output
+        .obj
+        .append_section_data(output.debug_str_offsets, &data.into_vec(), section.align()))
 }
 
 /// Process a DWARF object. Copies relevant sections, compilation/type units and strings from DWARF
 /// object into output object.
 #[tracing::instrument(
     level = "trace",
-    skip(parent_debug_addr, output, arena_data, arena_mmap, arena_relocations)
+    skip(
+        parent_debug_addr,
+        string_table,
+        output,
+        arena_data,
+        arena_mmap,
+        arena_relocations
+    )
 )]
-fn process_dwarf_object<'input, 'output, 'arena: 'input>(
+fn process_dwarf_object<'input, 'output, 'arena: 'input, Endian: gimli::Endianity>(
     parent_debug_addr: DebugAddr<DwpReader<'arena>>,
     dwo: TargetDwarfObject,
+    string_table: &mut DwpStringTable<Endian>,
     output: &mut DwpOutputObject<'output>,
     arena_data: &'arena Arena<Cow<'input, [u8]>>,
     arena_mmap: &'arena Arena<Mmap>,
@@ -309,31 +471,25 @@ fn process_dwarf_object<'input, 'output, 'arena: 'input>(
         load_file_section(id, &dwo_obj, true, &arena_data, &arena_relocations)
     };
 
-    let mut dwarf = gimli::Dwarf::load(&mut load_dwo_section)?;
-    dwarf.debug_addr = parent_debug_addr.clone();
-    let mut iter = dwarf.units();
-    while let Some(header) = iter.next()? {
-        let unit = dwarf.unit(header)?;
+    let mut dwo_dwarf = gimli::Dwarf::load(&mut load_dwo_section)?;
+    dwo_dwarf.debug_addr = parent_debug_addr.clone();
 
-        if matches!(dwo_id_of_unit(&unit), Some(dwo_id) if dwo_id == dwo.dwo_id) {
-            trace!("match!");
-        }
-    }
-
-    let mut append_section_data = |gimli_id: gimli::SectionId, obj_id: SectionId| -> Result<u64> {
-        let name = gimli_id.dwo_name().unwrap();
+    let mut append_from_to = |from_id: gimli::SectionId, to_id: SectionId| -> Result<u64> {
+        let name = from_id.dwo_name().unwrap();
         let section = dwo_obj
             .section_by_name(name)
             .with_context(|| DwpError::DwarfObjectMissingSection(name.to_string()))?;
         Ok(output
             .obj
-            .append_section_data(obj_id, section.data()?, section.align()))
+            .append_section_data(to_id, section.data()?, section.align()))
     };
 
-    let _ = append_section_data(gimli::SectionId::DebugAbbrev, output.debug_abbrev);
-    let _ = append_section_data(gimli::SectionId::DebugLine, output.debug_line);
-    let _ = append_section_data(gimli::SectionId::DebugLocLists, output.debug_loclists);
-    let _ = append_section_data(gimli::SectionId::DebugRngLists, output.debug_rnglists);
+    let _ = append_from_to(gimli::SectionId::DebugAbbrev, output.debug_abbrev);
+    let _ = append_from_to(gimli::SectionId::DebugLine, output.debug_line);
+    let _ = append_from_to(gimli::SectionId::DebugLocLists, output.debug_loclists);
+    let _ = append_from_to(gimli::SectionId::DebugRngLists, output.debug_rnglists);
+
+    let _ = append_debug_str_offset(&dwo_obj, &dwo_dwarf, string_table, output)?;
 
     Ok(())
 }
@@ -362,16 +518,22 @@ fn main() -> Result<()> {
         parse_executable(&obj, &arena_data, &arena_relocations)?;
 
     let mut output = create_output_object(obj.architecture(), obj.endianness())?;
+    let mut string_table = DwpStringTable::new(runtime_endian_of_object(&obj));
+
     for dwo in dwarf_objects {
         process_dwarf_object(
             parent_debug_addr.clone(),
             dwo,
+            &mut string_table,
             &mut output,
             &arena_data,
             &arena_mmap,
             &arena_relocations,
         )?;
     }
+
+    // Write the merged string table to the `.debug_str.dwo` section.
+    let _ = string_table.write(&mut output.obj, output.debug_str);
 
     let mut output_stream = StreamingBuffer::new(BufWriter::new(
         fs::File::create(opt.output).context(DwpError::FailedToCreateOutputFile)?,
