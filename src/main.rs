@@ -154,10 +154,7 @@ impl<E: gimli::Endianity> DwpStringTable<E> {
         let (index, is_new) = self.strings.insert_full(bytes.clone());
         let index = DwpStringId(index);
         if !is_new {
-            return Ok(*self
-                .offsets
-                .get(&index)
-                .expect("insert exists but no offset"));
+            return Ok(*self.offsets.get(&index).expect("insert exists but no offset"));
         }
 
         // Keep track of the offset for this string, it might be referenced by the next compilation
@@ -280,11 +277,7 @@ fn load_file_section<'input, 'arena: 'input>(
     arena_relocations: &'arena Arena<RelocationMap>,
 ) -> Result<DwpReader<'arena>> {
     let mut relocations = RelocationMap::default();
-    let name = if is_dwo {
-        id.dwo_name()
-    } else {
-        Some(id.name())
-    };
+    let name = if is_dwo { id.dwo_name() } else { Some(id.name()) };
 
     let data = match name.and_then(|name| obj.section_by_name(&name)) {
         Some(ref section) => {
@@ -301,11 +294,7 @@ fn load_file_section<'input, 'arena: 'input>(
     let reader = gimli::EndianSlice::new(data_ref, runtime_endian_of_object(obj));
     let section = reader;
     let relocations = (*arena_relocations.alloc(relocations)).borrow();
-    Ok(Relocate {
-        relocations,
-        section,
-        reader,
-    })
+    Ok(Relocate { relocations, section, reader })
 }
 
 /// Returns the `DwoId` of a DIE.
@@ -358,10 +347,7 @@ fn dwo_id_and_path_of_unit<R: gimli::Reader>(
             return Err(anyhow!(DwpError::DwoIdWithoutDwoName));
         };
 
-        dwarf
-            .attr_string(&unit, dwo_name)?
-            .to_string()?
-            .into_owned()
+        dwarf.attr_string(&unit, dwo_name)?.to_string()?.into_owned()
     };
 
     // Prepend the compilation directory if it exists.
@@ -466,10 +452,7 @@ fn append_str_offsets<'input, 'output, 'arena: 'input, Endian: gimli::Endianity>
 
     let mut data = EndianVec::new(runtime_endian_of_object(dwo_obj));
 
-    let root_header = dwo_dwarf
-        .units()
-        .next()?
-        .context(DwpError::DwarfObjectWithNoUnits)?;
+    let root_header = dwo_dwarf.units().next()?.context(DwpError::DwarfObjectWithNoUnits)?;
     let encoding = root_header.encoding();
     let base = DebugStrOffsetsBase::default_for_encoding_and_file(encoding, DwarfFileType::Dwo);
 
@@ -478,52 +461,29 @@ fn append_str_offsets<'input, 'output, 'arena: 'input, Endian: gimli::Endianity>
         Format::Dwarf64 => 8,
     };
 
-    debug!(
-        ?section_size,
-        str_offset_size_num_elements = section_size / entry_size
-    );
+    debug!(?section_size, str_offset_size_num_elements = section_size / entry_size);
     for i in 0..(section_size / entry_size) {
         let dwo_index = DebugStrOffsetsIndex(i as usize);
         let dwo_offset =
-            dwo_dwarf
-                .debug_str_offsets
-                .get_str_offset(encoding.format, base, dwo_index)?;
+            dwo_dwarf.debug_str_offsets.get_str_offset(encoding.format, base, dwo_index)?;
         let dwo_str = dwo_dwarf.debug_str.get_str(dwo_offset)?;
         let dwo_str = dwo_str.to_string()?;
 
         let dwp_offset = string_table.get_or_insert(dwo_str.as_ref())?;
-        debug!(
-            ?i,
-            ?dwo_str,
-            "dwo_offset={:#x} dwp_offset={:#x}",
-            dwo_offset.0,
-            dwp_offset.0
-        );
+        debug!(?i, ?dwo_str, "dwo_offset={:#x} dwp_offset={:#x}", dwo_offset.0, dwp_offset.0);
 
         match encoding.format {
             Format::Dwarf32 => {
-                data.write_u32(
-                    dwp_offset
-                        .0
-                        .try_into()
-                        .context(DwpError::DwpStrOffsetOutOfRange)?,
-                )?;
+                data.write_u32(dwp_offset.0.try_into().context(DwpError::DwpStrOffsetOutOfRange)?)?;
             }
             Format::Dwarf64 => {
-                data.write_u64(
-                    dwp_offset
-                        .0
-                        .try_into()
-                        .context(DwpError::DwpStrOffsetOutOfRange)?,
-                )?;
+                data.write_u64(dwp_offset.0.try_into().context(DwpError::DwpStrOffsetOutOfRange)?)?;
             }
         }
     }
 
     let offset =
-        output
-            .obj
-            .append_section_data(output.debug_str_offsets, &data.into_vec(), section.align());
+        output.obj.append_section_data(output.debug_str_offsets, &data.into_vec(), section.align());
     Ok(Some(Contribution {
         offset: ContributionOffset(offset),
         size: section_size.try_into().expect("too large for u32"),
@@ -557,23 +517,16 @@ where
                 .data_range(dwo_offset.try_into().unwrap(), dwo_length)?
                 .ok_or(DwpError::CompilationUnitWithNoData)?;
             let dwp_offset =
-                output
-                    .obj
-                    .append_section_data(output.debug_info, dwo_data, debug_info.align());
+                output.obj.append_section_data(output.debug_info, dwo_data, debug_info.align());
 
             create_cu_entry(
                 dwo_id,
-                Contribution {
-                    offset: ContributionOffset(dwp_offset),
-                    size: dwo_length,
-                },
+                Contribution { offset: ContributionOffset(dwp_offset), size: dwo_length },
             );
 
             Ok(())
         }
-        (Some(..), _) => Err(anyhow!(
-            DwpError::DwarfObjectCompilationUnitWithDwoIdNotSplitUnit
-        )),
+        (Some(..), _) => Err(anyhow!(DwpError::DwarfObjectCompilationUnitWithDwoIdNotSplitUnit)),
         _ => Ok(()),
     }
 }
@@ -596,9 +549,7 @@ fn append_section<'input, 'output>(
 
             Ok(Some(Contribution { offset: ContributionOffset(offset), size }))
         }
-        None if required => Err(anyhow!(DwpError::DwarfObjectMissingSection(
-            name.to_string()
-        ))),
+        None if required => Err(anyhow!(DwpError::DwarfObjectMissingSection(name.to_string()))),
         None => Ok(None),
     }
 }
@@ -607,14 +558,7 @@ fn append_section<'input, 'output>(
 /// object into output object.
 #[tracing::instrument(
     level = "trace",
-    skip(
-        parent_debug_addr,
-        string_table,
-        output,
-        arena_data,
-        arena_mmap,
-        arena_relocations
-    )
+    skip(parent_debug_addr, string_table, output, arena_data, arena_mmap, arena_relocations)
 )]
 fn process_dwarf_object<'input, 'output, 'arena: 'input, Endian: gimli::Endianity>(
     parent_debug_addr: DebugAddr<DwpReader<'arena>>,
@@ -709,10 +653,7 @@ fn next_pow2(mut val: u32) -> u32 {
 /// Returns a hash table computed for `elements`. Used in the `.debug_{cu,tu}_index` sections.
 #[tracing::instrument(level = "trace", skip_all)]
 fn bucket<B: Bucketable + fmt::Debug>(elements: &[B]) -> Vec<u32> {
-    let unit_count: u32 = elements
-        .len()
-        .try_into()
-        .expect("unit count too big for u32");
+    let unit_count: u32 = elements.len().try_into().expect("unit count too big for u32");
     let num_buckets = next_pow2(3 * unit_count / 2);
     let mask: u64 = num_buckets as u64 - 1;
 
@@ -753,9 +694,7 @@ fn write_indices<'output, E: gimli::Endianity>(
     debug!(?has_loc, ?has_line, ?has_str_off, ?has_rng);
 
     let num_columns = cu_index_entries.first().unwrap().number_of_columns();
-    assert!(cu_index_entries
-        .iter()
-        .all(|e| e.number_of_columns() == num_columns));
+    assert!(cu_index_entries.iter().all(|e| e.number_of_columns() == num_columns));
     debug!(?num_columns);
 
     // DWARF 5
@@ -841,22 +780,18 @@ fn write_indices<'output, E: gimli::Endianity>(
     }
 
     // FIXME: use the correct alignment here
-    let _ = output
-        .obj
-        .append_section_data(output.debug_cu_index, &cu_index_data.into_vec(), 1);
+    let _ = output.obj.append_section_data(output.debug_cu_index, &cu_index_data.into_vec(), 1);
     Ok(())
 }
 
 fn main() -> Result<()> {
-    let subscriber = Registry::default()
-        .with(EnvFilter::from_env("RUST_DWP_LOG"))
-        .with(
-            HierarchicalLayer::default()
-                .with_writer(io::stderr)
-                .with_indent_lines(true)
-                .with_targets(true)
-                .with_indent_amount(2),
-        );
+    let subscriber = Registry::default().with(EnvFilter::from_env("RUST_DWP_LOG")).with(
+        HierarchicalLayer::default()
+            .with_writer(io::stderr)
+            .with_indent_lines(true)
+            .with_targets(true)
+            .with_indent_amount(2),
+    );
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
     let opt = Opt::from_args();

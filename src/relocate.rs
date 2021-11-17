@@ -172,19 +172,13 @@ pub(crate) fn add_relocations(
 
             if relocations.insert(offset, relocation).is_some() {
                 return Err(anyhow!(DwpError::MultipleRelocations(
-                    section
-                        .name()
-                        .context(DwpError::SectionWithoutName(offset))?
-                        .to_string(),
+                    section.name().context(DwpError::SectionWithoutName(offset))?.to_string(),
                     offset,
                 )));
             }
         } else {
             return Err(anyhow!(DwpError::UnsupportedRelocation(
-                section
-                    .name()
-                    .context(DwpError::SectionWithoutName(offset))?
-                    .to_string(),
+                section.name().context(DwpError::SectionWithoutName(offset))?.to_string(),
                 offset,
             )));
         }
