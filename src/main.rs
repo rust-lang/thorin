@@ -69,95 +69,53 @@ enum PackageFormat {
     DwarfStd,
 }
 
-/// Sections contained in an output package depending on format being created.
-#[derive(Copy, Clone, Eq, Hash, PartialEq)]
-enum OutputPackageSections {
-    /// GNU's DWARF package file format (preceded standardized version from DWARF 5).
-    ///
-    /// See [specification](https://gcc.gnu.org/wiki/DebugFissionDWP).
-    GnuExtension {
-        /// Identifier for the `.debug_info.dwo` section in the object file being created.
-        ///
-        /// Contains concatenated compilation units from `.debug_info.dwo` sections of input DWARF
-        /// objects with matching `DW_AT_GNU_dwo_id` attributes.
-        /// DWARF objects.
-        debug_info: SectionId,
-        /// Identifier for the `.debug_abbrev.dwo` section in the object file being created.
-        ///
-        /// Contains concatenated `.debug_abbrev.dwo` sections from input DWARF objects.
-        debug_abbrev: SectionId,
-        /// Identifier for the `.debug_str.dwo` section in the object file being created.
-        ///
-        /// Contains a string table merged from the `.debug_str.dwo` sections of input DWARF
-        /// objects.
-        debug_str: SectionId,
-        /// Identifier for the `.debug_types.dwo` section in the object file being created.
-        ///
-        /// Contains concatenated type units from `.debug_types.dwo` sections of input DWARF
-        /// objects with matching type signatures.
-        debug_types: SectionId,
-        /// Identifier for the `.debug_line.dwo` section in the object file being created.
-        ///
-        /// Contains concatenated `.debug_line.dwo` sections from input DWARF objects.
-        debug_line: SectionId,
-        /// Identifier for the `.debug_loc.dwo` section in the object file being created.
-        ///
-        /// Contains concatenated `.debug_loc.dwo` sections from input DWARF objects.
-        debug_loc: SectionId,
-        /// Identifier for the `.debug_str_offsets.dwo` section in the object file being created.
-        ///
-        /// Contains concatenated `.debug_str_offsets.dwo` sections from input DWARF objects,
-        /// re-written with offsets into the merged `.debug_str.dwo` section.
-        debug_str_offsets: SectionId,
-        /// Identifier for the `.debug_macinfo.dwo` section in the object file being created.
-        ///
-        /// Contains concatenated `.debug_macinfo.dwo` sections from input DWARF objects.
-        debug_macinfo: SectionId,
-        /// Identifier for the `.debug_macro.dwo` section in the object file being created.
-        ///
-        /// Contains concatenated `.debug_macro.dwo` sections from input DWARF objects.
-        debug_macro: SectionId,
-    },
-    /// DWARF 5-standardized package file format.
-    ///
-    /// See Sec 7.3.5 and Appendix F of [DWARF specification](https://dwarfstd.org/doc/DWARF5.pdf).
-    DwarfStd {
-        /// Identifier for the `.debug_info.dwo` section in the object file being created.
-        ///
-        /// Contains concatenated split compilation and type units from `.debug_info.dwo` sections
-        /// of input DWARF objects.
-        debug_info: SectionId,
-        /// Identifier for the `.debug_abbrev.dwo` section in the object file being created.
-        ///
-        /// Contains concatenated `.debug_abbrev.dwo` sections from input DWARF objects.
-        debug_abbrev: SectionId,
-        /// Identifier for the `.debug_str.dwo` section in the object file being created.
-        ///
-        /// Contains a string table merged from the `.debug_str.dwo` sections of input DWARF
-        /// objects.
-        debug_str: SectionId,
-        /// Identifier for the `.debug_line.dwo` section in the object file being created.
-        ///
-        /// Contains concatenated `.debug_line.dwo` sections from input DWARF objects.
-        debug_line: SectionId,
-        /// Identifier for the `.debug_loclists.dwo` section in the object file being created.
-        ///
-        /// Contains concatenated `.debug_loclists.dwo` sections from input DWARF objects.
-        debug_loclists: SectionId,
-        /// Identifier for the `.debug_rnglists.dwo` section in the object file being created.
-        ///
-        /// Contains concatenated `.debug_rnglists.dwo` sections from input DWARF objects.
-        debug_rnglists: SectionId,
-        /// Identifier for the `.debug_str_offsets.dwo` section in the object file being created.
-        ///
-        /// Contains concatenated `.debug_str_offsets.dwo` sections from input DWARF objects,
-        /// re-written with offsets into the merged `.debug_str.dwo` section.
-        debug_str_offsets: SectionId,
-        /// Identifier for the `.debug_macro.dwo` section in the object file being created.
-        ///
-        /// Contains concatenated `.debug_macro.dwo` sections from input DWARF objects.
-        debug_macro: SectionId,
-    },
+/// Helper trait for types that have a corresponding `gimli::SectionId`.
+trait HasGimliId {
+    /// Return the corresponding `gimli::SectionId`.
+    fn gimli_id() -> gimli::SectionId;
+}
+
+macro_rules! define_section_markers {
+    ( $( $name:ident ),+ ) => {
+        $(
+            /// Marker type implementing `HasGimliId`, corresponds to `gimli::SectionId::$name`.
+            /// Intended for use with `LazySectionId`.
+            #[derive(Default)]
+            struct $name;
+
+            impl HasGimliId for $name {
+                fn gimli_id() -> gimli::SectionId { gimli::SectionId::$name }
+            }
+        )+
+    }
+}
+
+define_section_markers!(DebugInfo, DebugAbbrev, DebugStr, DebugTypes, DebugLine, DebugLoc);
+define_section_markers!(DebugLocLists, DebugRngLists, DebugStrOffsets, DebugMacinfo, DebugMacro);
+
+/// Wrapper around `Option<SectionId>` for creating the `SectionId` on first access (if it does
+/// not exist).
+#[derive(Default)]
+struct LazySectionId<Id: HasGimliId> {
+    id: Option<SectionId>,
+    _id: std::marker::PhantomData<Id>,
+}
+
+impl<Id: HasGimliId> LazySectionId<Id> {
+    fn get<'file>(&mut self, obj: &mut write::Object<'file>) -> SectionId {
+        match self.id {
+            Some(id) => id,
+            None => {
+                let id = obj.add_section(
+                    Vec::new(),
+                    dwo_name(Id::gimli_id()).as_bytes().to_vec(),
+                    SectionKind::Debug,
+                );
+                self.id = Some(id);
+                id
+            }
+        }
+    }
 }
 
 /// In-progress DWARF package being produced.
@@ -172,9 +130,58 @@ struct OutputPackage<'file> {
     /// depends on whether this is a GNU extension-flavoured package or DWARF 5-flavoured package.
     debug_tu_index: SectionId,
 
-    /// Non-index sections of a DWARF package depend on whether this is a GNU extension-flavoured
-    /// package or a DWARF 5-flavoured package.
-    sections: OutputPackageSections,
+    /// Identifier for the `.debug_info.dwo` section in the object file being created.
+    ///
+    /// Contains concatenated compilation units from `.debug_info.dwo` sections of input DWARF
+    /// objects with matching `DW_AT_GNU_dwo_id` attributes.
+    debug_info: LazySectionId<DebugInfo>,
+    /// Identifier for the `.debug_abbrev.dwo` section in the object file being created.
+    ///
+    /// Contains concatenated `.debug_abbrev.dwo` sections from input DWARF objects.
+    debug_abbrev: LazySectionId<DebugAbbrev>,
+    /// Identifier for the `.debug_str.dwo` section in the object file being created.
+    ///
+    /// Contains a string table merged from the `.debug_str.dwo` sections of input DWARF
+    /// objects.
+    debug_str: LazySectionId<DebugStr>,
+    /// Identifier for the `.debug_types.dwo` section in the object file being created.
+    ///
+    /// Contains concatenated type units from `.debug_types.dwo` sections of input DWARF
+    /// objects with matching type signatures.
+    debug_types: LazySectionId<DebugTypes>,
+    /// Identifier for the `.debug_line.dwo` section in the object file being created.
+    ///
+    /// Contains concatenated `.debug_line.dwo` sections from input DWARF objects.
+    debug_line: LazySectionId<DebugLine>,
+    /// Identifier for the `.debug_loc.dwo` section in the object file being created.
+    ///
+    /// Contains concatenated `.debug_loc.dwo` sections from input DWARF objects. Only with DWARF
+    /// 4 GNU extension.
+    debug_loc: LazySectionId<DebugLoc>,
+    /// Identifier for the `.debug_loclists.dwo` section in the object file being created.
+    ///
+    /// Contains concatenated `.debug_loclists.dwo` sections from input DWARF objects. Only with
+    /// DWARF 5.
+    debug_loclists: LazySectionId<DebugLocLists>,
+    /// Identifier for the `.debug_rnglists.dwo` section in the object file being created.
+    ///
+    /// Contains concatenated `.debug_rnglists.dwo` sections from input DWARF objects. Only with
+    /// DWARF 5.
+    debug_rnglists: LazySectionId<DebugRngLists>,
+    /// Identifier for the `.debug_str_offsets.dwo` section in the object file being created.
+    ///
+    /// Contains concatenated `.debug_str_offsets.dwo` sections from input DWARF objects,
+    /// re-written with offsets into the merged `.debug_str.dwo` section.
+    debug_str_offsets: LazySectionId<DebugStrOffsets>,
+    /// Identifier for the `.debug_macinfo.dwo` section in the object file being created.
+    ///
+    /// Contains concatenated `.debug_macinfo.dwo` sections from input DWARF objects. Only with
+    /// DWARF 4 GNU extension.
+    debug_macinfo: LazySectionId<DebugMacinfo>,
+    /// Identifier for the `.debug_macro.dwo` section in the object file being created.
+    ///
+    /// Contains concatenated `.debug_macro.dwo` sections from input DWARF objects.
+    debug_macro: LazySectionId<DebugMacro>,
 }
 
 /// New-type'd index (constructed from `gimli::DwoID`) with a custom `Debug` implementation to
@@ -298,10 +305,16 @@ impl<E: gimli::Endianity> DwpStringTable<E> {
     }
 
     /// Write the accumulated `.debug_str` section to an object file, returns the offset of the
-    /// section in the object.
-    fn write<'file>(self, obj: &mut write::Object<'file>, section: SectionId) -> u64 {
-        // FIXME: what is the correct way to determine this alignment
-        obj.append_section_data(section, &self.debug_str.0.into_vec(), 1)
+    /// section in the object (if there was a `.debug_str` section to write at all).
+    fn write<'output>(self, output: &mut OutputPackage<'output>) -> Option<u64> {
+        let data = self.debug_str.0.slice();
+        if !data.is_empty() {
+            // FIXME: what is the correct way to determine this alignment
+            let id = output.debug_str.get(&mut output.obj);
+            Some(output.obj.append_section_data(id, data, 1))
+        } else {
+            None
+        }
     }
 }
 
@@ -322,7 +335,7 @@ impl fmt::Debug for ContributionOffset {
 
 trait IndexEntry: Bucketable {
     /// Return the number of columns in `.debug_{cu,tu}_index` required by this entry.
-    fn number_of_columns(&self) -> u32;
+    fn number_of_columns(&self, format: PackageFormat) -> u32;
 
     /// Return the signature of the entry (`DwoId` or `DebugTypeSignature`).
     fn signature(&self) -> u64;
@@ -341,6 +354,7 @@ trait IndexEntry: Bucketable {
     /// chosen by `proj` closure.
     fn write_contribution<Endian, Proj>(
         &self,
+        format: PackageFormat,
         out: &mut EndianVec<Endian>,
         proj: Proj,
     ) -> Result<()>
@@ -378,7 +392,7 @@ struct TuIndexEntry {
 }
 
 impl IndexEntry for TuIndexEntry {
-    fn number_of_columns(&self) -> u32 {
+    fn number_of_columns(&self, _: PackageFormat) -> u32 {
         2 /* info/types and abbrev are required columns */
         + self.debug_line.map_or(0, |_| 1)
         + self.debug_str_offsets.map_or(0, |_| 1)
@@ -421,6 +435,7 @@ impl IndexEntry for TuIndexEntry {
 
     fn write_contribution<Endian, Proj>(
         &self,
+        _: PackageFormat,
         out: &mut EndianVec<Endian>,
         proj: Proj,
     ) -> Result<()>
@@ -444,65 +459,35 @@ impl IndexEntry for TuIndexEntry {
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 struct CuIndexEntry {
     dwo_id: DwoId,
-    kind: CuIndexEntryKind,
-}
-
-/// Contributions from sections for the current index entry. Relevant sections depend on GNU
-/// extension or DWARF 5 package format.
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
-enum CuIndexEntryKind {
-    GnuExtension {
-        debug_info: Contribution,
-        debug_abbrev: Contribution,
-        debug_line: Option<Contribution>,
-        debug_loc: Option<Contribution>,
-        debug_str_offsets: Option<Contribution>,
-        debug_macinfo: Option<Contribution>,
-        debug_macro: Option<Contribution>,
-    },
-    DwarfStd {
-        debug_info: Contribution,
-        debug_abbrev: Contribution,
-        debug_line: Option<Contribution>,
-        debug_loclists: Option<Contribution>,
-        debug_rnglists: Option<Contribution>,
-        debug_str_offsets: Option<Contribution>,
-        debug_macro: Option<Contribution>,
-    },
+    debug_info: Contribution,
+    debug_abbrev: Contribution,
+    debug_line: Option<Contribution>,
+    debug_loc: Option<Contribution>,
+    debug_loclists: Option<Contribution>,
+    debug_rnglists: Option<Contribution>,
+    debug_str_offsets: Option<Contribution>,
+    debug_macinfo: Option<Contribution>,
+    debug_macro: Option<Contribution>,
 }
 
 impl IndexEntry for CuIndexEntry {
-    fn number_of_columns(&self) -> u32 {
-        match self.kind {
-            CuIndexEntryKind::GnuExtension {
-                debug_line,
-                debug_loc,
-                debug_str_offsets,
-                debug_macinfo,
-                debug_macro,
-                ..
-            } => {
+    fn number_of_columns(&self, format: PackageFormat) -> u32 {
+        match format {
+            PackageFormat::GnuExtension => {
                 2 /* info and abbrev are required columns */
-                + debug_line.map_or(0, |_| 1)
-                + debug_loc.map_or(0, |_| 1)
-                + debug_str_offsets.map_or(0, |_| 1)
-                + debug_macinfo.map_or(0, |_| 1)
-                + debug_macro.map_or(0, |_| 1)
+                + self.debug_line.map_or(0, |_| 1)
+                + self.debug_loc.map_or(0, |_| 1)
+                + self.debug_str_offsets.map_or(0, |_| 1)
+                + self.debug_macinfo.map_or(0, |_| 1)
+                + self.debug_macro.map_or(0, |_| 1)
             }
-            CuIndexEntryKind::DwarfStd {
-                debug_line,
-                debug_loclists,
-                debug_rnglists,
-                debug_str_offsets,
-                debug_macro,
-                ..
-            } => {
+            PackageFormat::DwarfStd => {
                 2 /* info and abbrev are required columns */
-                + debug_line.map_or(0, |_| 1)
-                + debug_loclists.map_or(0, |_| 1)
-                + debug_rnglists.map_or(0, |_| 1)
-                + debug_str_offsets.map_or(0, |_| 1)
-                + debug_macro.map_or(0, |_| 1)
+                + self.debug_line.map_or(0, |_| 1)
+                + self.debug_loclists.map_or(0, |_| 1)
+                + self.debug_rnglists.map_or(0, |_| 1)
+                + self.debug_str_offsets.map_or(0, |_| 1)
+                + self.debug_macro.map_or(0, |_| 1)
             }
         }
     }
@@ -513,59 +498,45 @@ impl IndexEntry for CuIndexEntry {
 
     fn write_header<Endian: gimli::Endianity>(
         &self,
-        _: PackageFormat,
+        format: PackageFormat,
         out: &mut EndianVec<Endian>,
     ) -> Result<()> {
-        match self.kind {
-            CuIndexEntryKind::GnuExtension {
-                debug_line,
-                debug_loc,
-                debug_str_offsets,
-                debug_macinfo,
-                debug_macro,
-                ..
-            } => {
+        match format {
+            PackageFormat::GnuExtension => {
                 out.write_u32(gimli::DW_SECT_V2_INFO.0)?;
                 out.write_u32(gimli::DW_SECT_V2_ABBREV.0)?;
-                if debug_line.is_some() {
+                if self.debug_line.is_some() {
                     out.write_u32(gimli::DW_SECT_V2_LINE.0)?;
                 }
-                if debug_loc.is_some() {
+                if self.debug_loc.is_some() {
                     out.write_u32(gimli::DW_SECT_V2_LOC.0)?;
                 }
-                if debug_str_offsets.is_some() {
+                if self.debug_str_offsets.is_some() {
                     out.write_u32(gimli::DW_SECT_V2_STR_OFFSETS.0)?;
                 }
-                if debug_macinfo.is_some() {
+                if self.debug_macinfo.is_some() {
                     out.write_u32(gimli::DW_SECT_V2_MACINFO.0)?;
                 }
-                if debug_macro.is_some() {
+                if self.debug_macro.is_some() {
                     out.write_u32(gimli::DW_SECT_V2_MACRO.0)?;
                 }
             }
-            CuIndexEntryKind::DwarfStd {
-                debug_line,
-                debug_loclists,
-                debug_rnglists,
-                debug_str_offsets,
-                debug_macro,
-                ..
-            } => {
+            PackageFormat::DwarfStd => {
                 out.write_u32(gimli::DW_SECT_INFO.0)?;
                 out.write_u32(gimli::DW_SECT_ABBREV.0)?;
-                if debug_line.is_some() {
+                if self.debug_line.is_some() {
                     out.write_u32(gimli::DW_SECT_LINE.0)?;
                 }
-                if debug_loclists.is_some() {
+                if self.debug_loclists.is_some() {
                     out.write_u32(gimli::DW_SECT_LOCLISTS.0)?;
                 }
-                if debug_rnglists.is_some() {
+                if self.debug_rnglists.is_some() {
                     out.write_u32(gimli::DW_SECT_RNGLISTS.0)?;
                 }
-                if debug_str_offsets.is_some() {
+                if self.debug_str_offsets.is_some() {
                     out.write_u32(gimli::DW_SECT_STR_OFFSETS.0)?;
                 }
-                if debug_macro.is_some() {
+                if self.debug_macro.is_some() {
                     out.write_u32(gimli::DW_SECT_MACRO.0)?;
                 }
             }
@@ -576,6 +547,7 @@ impl IndexEntry for CuIndexEntry {
 
     fn write_contribution<Endian, Proj>(
         &self,
+        format: PackageFormat,
         out: &mut EndianVec<Endian>,
         proj: Proj,
     ) -> Result<()>
@@ -583,58 +555,42 @@ impl IndexEntry for CuIndexEntry {
         Endian: gimli::Endianity,
         Proj: Fn(Contribution) -> u32,
     {
-        match self.kind {
-            CuIndexEntryKind::GnuExtension {
-                debug_info,
-                debug_abbrev,
-                debug_line,
-                debug_loc,
-                debug_str_offsets,
-                debug_macinfo,
-                debug_macro,
-            } => {
-                out.write_u32(proj(debug_info))?;
-                out.write_u32(proj(debug_abbrev))?;
-                if let Some(debug_line) = debug_line {
+        match format {
+            PackageFormat::GnuExtension => {
+                out.write_u32(proj(self.debug_info))?;
+                out.write_u32(proj(self.debug_abbrev))?;
+                if let Some(debug_line) = self.debug_line {
                     out.write_u32(proj(debug_line))?;
                 }
-                if let Some(debug_loc) = debug_loc {
+                if let Some(debug_loc) = self.debug_loc {
                     out.write_u32(proj(debug_loc))?;
                 }
-                if let Some(debug_str_offsets) = debug_str_offsets {
+                if let Some(debug_str_offsets) = self.debug_str_offsets {
                     out.write_u32(proj(debug_str_offsets))?;
                 }
-                if let Some(debug_macinfo) = debug_macinfo {
+                if let Some(debug_macinfo) = self.debug_macinfo {
                     out.write_u32(proj(debug_macinfo))?;
                 }
-                if let Some(debug_macro) = debug_macro {
+                if let Some(debug_macro) = self.debug_macro {
                     out.write_u32(proj(debug_macro))?;
                 }
             }
-            CuIndexEntryKind::DwarfStd {
-                debug_info,
-                debug_abbrev,
-                debug_line,
-                debug_loclists,
-                debug_rnglists,
-                debug_str_offsets,
-                debug_macro,
-            } => {
-                out.write_u32(proj(debug_info))?;
-                out.write_u32(proj(debug_abbrev))?;
-                if let Some(debug_line) = debug_line {
+            PackageFormat::DwarfStd => {
+                out.write_u32(proj(self.debug_info))?;
+                out.write_u32(proj(self.debug_abbrev))?;
+                if let Some(debug_line) = self.debug_line {
                     out.write_u32(proj(debug_line))?;
                 }
-                if let Some(debug_loclists) = debug_loclists {
+                if let Some(debug_loclists) = self.debug_loclists {
                     out.write_u32(proj(debug_loclists))?;
                 }
-                if let Some(debug_rnglists) = debug_rnglists {
+                if let Some(debug_rnglists) = self.debug_rnglists {
                     out.write_u32(proj(debug_rnglists))?;
                 }
-                if let Some(debug_str_offsets) = debug_str_offsets {
+                if let Some(debug_str_offsets) = self.debug_str_offsets {
                     out.write_u32(proj(debug_str_offsets))?;
                 }
-                if let Some(debug_macro) = debug_macro {
+                if let Some(debug_macro) = self.debug_macro {
                     out.write_u32(proj(debug_macro))?;
                 }
             }
@@ -848,31 +804,22 @@ fn create_output_object<'file>(
     let debug_cu_index = add_section(DebugCuIndex);
     let debug_tu_index = add_section(DebugTuIndex);
 
-    let sections = match format {
-        PackageFormat::GnuExtension => OutputPackageSections::GnuExtension {
-            debug_info: add_section(DebugInfo),
-            debug_abbrev: add_section(DebugAbbrev),
-            debug_str: add_section(DebugStr),
-            debug_types: add_section(DebugTypes),
-            debug_line: add_section(DebugLine),
-            debug_loc: add_section(DebugLoc),
-            debug_str_offsets: add_section(DebugStrOffsets),
-            debug_macinfo: add_section(DebugMacinfo),
-            debug_macro: add_section(DebugMacro),
-        },
-        PackageFormat::DwarfStd => OutputPackageSections::DwarfStd {
-            debug_info: add_section(DebugInfo),
-            debug_abbrev: add_section(DebugAbbrev),
-            debug_str: add_section(DebugStr),
-            debug_line: add_section(DebugLine),
-            debug_loclists: add_section(DebugLocLists),
-            debug_rnglists: add_section(DebugRngLists),
-            debug_str_offsets: add_section(DebugStrOffsets),
-            debug_macro: add_section(DebugMacro),
-        },
-    };
-
-    Ok(OutputPackage { obj, debug_cu_index, debug_tu_index, sections })
+    Ok(OutputPackage {
+        obj,
+        debug_cu_index,
+        debug_tu_index,
+        debug_info: Default::default(),
+        debug_abbrev: Default::default(),
+        debug_str: Default::default(),
+        debug_types: Default::default(),
+        debug_line: Default::default(),
+        debug_loc: Default::default(),
+        debug_loclists: Default::default(),
+        debug_rnglists: Default::default(),
+        debug_str_offsets: Default::default(),
+        debug_macinfo: Default::default(),
+        debug_macro: Default::default(),
+    })
 }
 
 /// Read the string offsets from `.debug_str_offsets.dwo` in the DWARF object, adding each to the
@@ -884,8 +831,7 @@ fn append_str_offsets<'input, 'output, 'arena: 'input, Endian: gimli::Endianity>
     string_table: &mut DwpStringTable<Endian>,
     input: &object::File<'input>,
     input_dwarf: &gimli::Dwarf<DwpReader<'arena>>,
-    output: &mut write::Object<'output>,
-    output_id: SectionId,
+    output: &mut OutputPackage<'output>,
 ) -> Result<Option<Contribution>> {
     let section_name = gimli::SectionId::DebugStrOffsets.dwo_name().unwrap();
     let section = match input.section_by_name(section_name) {
@@ -930,11 +876,16 @@ fn append_str_offsets<'input, 'output, 'arena: 'input, Endian: gimli::Endianity>
         }
     }
 
-    let offset = output.append_section_data(output_id, &data.into_vec(), section.align());
-    Ok(Some(Contribution {
-        offset: ContributionOffset(offset),
-        size: section_size.try_into().expect("too large for u32"),
-    }))
+    if num_elements > 0 {
+        let id = output.debug_str_offsets.get(&mut output.obj);
+        let offset = output.obj.append_section_data(id, data.slice(), section.align());
+        Ok(Some(Contribution {
+            offset: ContributionOffset(offset),
+            size: section_size.try_into().expect("too large for u32"),
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Append a unit from the input DWARF object to the `.debug_info` (or `.debug_types`) section in
@@ -942,19 +893,20 @@ fn append_str_offsets<'input, 'output, 'arena: 'input, Endian: gimli::Endianity>
 /// `DwarfObjectIdentifier`.
 #[tracing::instrument(level = "trace", skip_all)]
 fn append_unit<'input, 'arena, 'output: 'arena, CuOp, Sect, TuOp>(
+    format: PackageFormat,
     dwo: &TargetDwarfObject,
     section: &Sect,
     unit: &gimli::Unit<DwpReader<'arena>>,
-    output: &mut write::Object<'output>,
-    mut create_cu_entry: CuOp,
-    mut create_tu_entry: TuOp,
+    output: &mut OutputPackage<'output>,
+    mut append_cu_contribution: CuOp,
+    mut append_tu_contribution: TuOp,
 ) -> Result<()>
 where
-    CuOp: FnMut(&mut write::Object<'output>, DwoId, &[u8], u64),
-    TuOp: FnMut(&mut write::Object<'output>, DebugTypeSignature, &[u8], u64),
+    CuOp: FnMut(DwoId, Contribution),
+    TuOp: FnMut(DebugTypeSignature, Contribution),
     Sect: ObjectSection<'input>,
 {
-    let length: u64 = unit.header.length_including_self().try_into().unwrap();
+    let size: u64 = unit.header.length_including_self().try_into().unwrap();
     let offset = unit.header.offset();
 
     let identifier = dwo_identifier_of_unit(&unit);
@@ -966,10 +918,15 @@ where
         ) if dwo_id == target_dwo_id => {
             let offset = offset.as_debug_info_offset().unwrap().0;
             let data = section
-                .data_range(offset.try_into().unwrap(), length)?
+                .data_range(offset.try_into().unwrap(), size)?
                 .ok_or(DwpError::CompilationUnitWithNoData)?;
 
-            create_cu_entry(output, dwo_id, data, length);
+            if !data.is_empty() {
+                let id = output.debug_info.get(&mut output.obj);
+                let offset = output.obj.append_section_data(id, data, section.align());
+                let contribution = Contribution { offset: ContributionOffset(offset), size };
+                append_cu_contribution(dwo_id, contribution);
+            }
             Ok(())
         }
         (
@@ -979,10 +936,19 @@ where
         ) if type_signature == target_type_signature => {
             let offset = offset.as_debug_types_offset().unwrap().0;
             let data = section
-                .data_range(offset.try_into().unwrap(), length)?
+                .data_range(offset.try_into().unwrap(), size)?
                 .ok_or(DwpError::CompilationUnitWithNoData)?;
 
-            create_tu_entry(output, type_signature, data, length);
+            if !data.is_empty() {
+                let id = match format {
+                    PackageFormat::GnuExtension => output.debug_types.get(&mut output.obj),
+                    PackageFormat::DwarfStd => output.debug_info.get(&mut output.obj),
+                };
+                let offset = output.obj.append_section_data(id, data, section.align());
+                let contribution = Contribution { offset: ContributionOffset(offset), size };
+                append_tu_contribution(type_signature, contribution);
+            }
+
             Ok(())
         }
         (_, Some(..), _) => Err(anyhow!(DwpError::DwarfObjectCompilationUnitWithDwoIdNotSplitUnit)),
@@ -992,21 +958,26 @@ where
 
 /// Append the contents of a section from the input DWARF object to the equivalent section in the
 /// output object.
-#[tracing::instrument(level = "trace", skip(input, output))]
-fn append_section<'input, 'output>(
+#[tracing::instrument(level = "trace", skip(input, output, output_id))]
+fn append_section<'input, 'output, Id: HasGimliId>(
     input: &object::File<'input>,
     input_id: gimli::SectionId,
     output: &mut write::Object<'output>,
-    output_id: SectionId,
+    output_id: &mut LazySectionId<Id>,
     required: bool,
 ) -> Result<Option<Contribution>> {
     let name = dwo_name(input_id);
     match input.section_by_name(name) {
         Some(section) => {
             let size = section.size();
-            let offset = output.append_section_data(output_id, &section.data()?, section.align());
-
-            Ok(Some(Contribution { offset: ContributionOffset(offset), size }))
+            let data = section.data()?;
+            if !data.is_empty() {
+                let id = output_id.get(output);
+                let offset = output.append_section_data(id, &data, section.align());
+                Ok(Some(Contribution { offset: ContributionOffset(offset), size }))
+            } else {
+                Ok(None)
+            }
         }
         None if required => Err(anyhow!(DwpError::DwarfObjectMissingSection(name.to_string()))),
         None => Ok(None),
@@ -1020,6 +991,7 @@ fn append_section<'input, 'output>(
     skip(parent_debug_addr, string_table, output, arena_data, arena_mmap, arena_relocations)
 )]
 fn process_dwarf_object<'input, 'output, 'arena: 'input, Endian: gimli::Endianity>(
+    format: PackageFormat,
     parent_debug_addr: DebugAddr<DwpReader<'arena>>,
     dwo: TargetDwarfObject,
     cu_index_entries: &mut Vec<CuIndexEntry>,
@@ -1034,182 +1006,126 @@ fn process_dwarf_object<'input, 'output, 'arena: 'input, Endian: gimli::Endianit
 
     let dwo_obj = load_object_file(&arena_mmap, &dwo.path)?;
 
+    // Concatenate contents of sections from the DWARF object into the corresponding section in
+    // the output.
+    let debug_abbrev =
+        append_section(&dwo_obj, DebugAbbrev, &mut output.obj, &mut output.debug_abbrev, true)?
+            .expect("required section didn't return error");
+    let debug_line =
+        append_section(&dwo_obj, DebugLine, &mut output.obj, &mut output.debug_line, false)?;
+    let debug_macro =
+        append_section(&dwo_obj, DebugMacro, &mut output.obj, &mut output.debug_macro, false)?;
+
+    let (debug_loc, debug_macinfo, debug_loclists, debug_rnglists) = match format {
+        PackageFormat::GnuExtension => {
+            // Only `.debug_loc.dwo` and `.debug_macinfo.dwo` with the GNU extension.
+            let debug_loc =
+                append_section(&dwo_obj, DebugLoc, &mut output.obj, &mut output.debug_loc, false)?;
+            let debug_macinfo = append_section(
+                &dwo_obj,
+                DebugMacinfo,
+                &mut output.obj,
+                &mut output.debug_macinfo,
+                false,
+            )?;
+            (debug_loc, debug_macinfo, None, None)
+        }
+        PackageFormat::DwarfStd => {
+            // Only `.debug_loclists.dwo` and `.debug_rnglists.dwo` with DWARF 5.
+            let debug_loclists = append_section(
+                &dwo_obj,
+                DebugLocLists,
+                &mut output.obj,
+                &mut output.debug_loclists,
+                false,
+            )?;
+            let debug_rnglists = append_section(
+                &dwo_obj,
+                DebugRngLists,
+                &mut output.obj,
+                &mut output.debug_rnglists,
+                false,
+            )?;
+            (None, None, debug_loclists, debug_rnglists)
+        }
+    };
+
     let mut load_dwo_section = |id: gimli::SectionId| -> Result<_> {
         load_file_section(id, &dwo_obj, true, &arena_data, &arena_relocations)
     };
 
-    let mut append_section = |from: gimli::SectionId, to: SectionId, reqd: bool| -> Result<_> {
-        append_section(&dwo_obj, from, &mut output.obj, to, reqd)
-    };
+    let mut dwo_dwarf = gimli::Dwarf::load(&mut load_dwo_section)?;
+    dwo_dwarf.debug_addr = parent_debug_addr;
+
+    // Concatenate string offsets from the DWARF object into the `.debug_str_offsets` section in
+    // the output, rewriting offsets to be based on the new, merged string table.
+    let debug_str_offsets = append_str_offsets(
+        PackageFormat::GnuExtension,
+        string_table,
+        &dwo_obj,
+        &dwo_dwarf,
+        output,
+    )?;
 
     let debug_info_name = gimli::SectionId::DebugInfo.dwo_name().unwrap();
     let debug_info_section = dwo_obj
         .section_by_name(debug_info_name)
         .with_context(|| DwpError::DwarfObjectMissingSection(debug_info_name.to_string()))?;
 
-    let mut dwo_dwarf = gimli::Dwarf::load(&mut load_dwo_section)?;
-    dwo_dwarf.debug_addr = parent_debug_addr;
+    // Append compilation (and type units, in DWARF 5) from `.debug_info`.
+    let mut iter = dwo_dwarf.units();
+    while let Some(header) = iter.next()? {
+        let unit = dwo_dwarf.unit(header)?;
+        append_unit(
+            format,
+            &dwo,
+            &debug_info_section,
+            &unit,
+            output,
+            |dwo_id, debug_info| {
+                cu_index_entries.push(CuIndexEntry {
+                    dwo_id,
+                    debug_info,
+                    debug_abbrev,
+                    debug_line,
+                    debug_loc,
+                    debug_loclists,
+                    debug_rnglists,
+                    debug_str_offsets,
+                    debug_macinfo,
+                    debug_macro,
+                });
+            },
+            |type_signature, debug_info| {
+                tu_index_entries.push(TuIndexEntry {
+                    type_signature,
+                    debug_info_or_types: debug_info,
+                    debug_abbrev,
+                    debug_line,
+                    debug_str_offsets,
+                });
+            },
+        )?;
+    }
 
-    match output.sections {
-        OutputPackageSections::GnuExtension {
-            debug_info,
-            debug_abbrev,
-            debug_types,
-            debug_line,
-            debug_loc,
-            debug_str_offsets,
-            debug_macinfo,
-            debug_macro,
-            ..
-        } => {
-            let debug_abbrev = append_section(DebugAbbrev, debug_abbrev, true)?
-                .expect("required section didn't return error");
-            let debug_line = append_section(DebugLine, debug_line, false)?;
-            let debug_loc = append_section(DebugLoc, debug_loc, false)?;
-            let debug_macinfo = append_section(DebugMacinfo, debug_macinfo, false)?;
-            let debug_macro = append_section(DebugMacro, debug_macro, false)?;
-
-            let debug_str_offsets = append_str_offsets(
-                PackageFormat::GnuExtension,
-                string_table,
-                &dwo_obj,
-                &dwo_dwarf,
-                &mut output.obj,
-                debug_str_offsets,
-            )?;
-
-            let mut iter = dwo_dwarf.units();
+    // Append type units from `.debug_info` with the GNU extension.
+    if format == PackageFormat::GnuExtension {
+        let debug_types_name = gimli::SectionId::DebugTypes.dwo_name().unwrap();
+        if let Some(debug_types_section) = dwo_obj.section_by_name(debug_types_name) {
+            let mut iter = dwo_dwarf.type_units();
             while let Some(header) = iter.next()? {
                 let unit = dwo_dwarf.unit(header)?;
                 append_unit(
+                    format,
                     &dwo,
-                    &debug_info_section,
+                    &debug_types_section,
                     &unit,
-                    &mut output.obj,
-                    |output, dwo_id, unit_data, unit_size| {
-                        let offset = output.append_section_data(
-                            debug_info,
-                            unit_data,
-                            debug_info_section.align(),
-                        );
-                        let debug_info =
-                            Contribution { offset: ContributionOffset(offset), size: unit_size };
-                        cu_index_entries.push(CuIndexEntry {
-                            dwo_id,
-                            kind: CuIndexEntryKind::GnuExtension {
-                                debug_info,
-                                debug_abbrev,
-                                debug_line,
-                                debug_loc,
-                                debug_str_offsets,
-                                debug_macinfo,
-                                debug_macro,
-                            },
-                        });
-                    },
-                    |_, _, _, _| { /* no-op, no types in `.debug_info` on DWARF 4 */ },
-                )?;
-            }
-
-            let debug_types_name = gimli::SectionId::DebugTypes.dwo_name().unwrap();
-            if let Some(debug_types_section) = dwo_obj.section_by_name(debug_types_name) {
-                let mut iter = dwo_dwarf.type_units();
-                while let Some(header) = iter.next()? {
-                    let unit = dwo_dwarf.unit(header)?;
-                    append_unit(
-                        &dwo,
-                        &debug_types_section,
-                        &unit,
-                        &mut output.obj,
-                        |_, _, _, _| { /* no-op, no compilation units in `.debug_types` */ },
-                        |output, type_signature, unit_data, unit_size| {
-                            let offset = output.append_section_data(
-                                debug_types,
-                                unit_data,
-                                debug_types_section.align(),
-                            );
-                            let debug_types = Contribution {
-                                offset: ContributionOffset(offset),
-                                size: unit_size,
-                            };
-                            tu_index_entries.push(TuIndexEntry {
-                                type_signature,
-                                debug_info_or_types: debug_types,
-                                debug_abbrev,
-                                debug_line,
-                                debug_str_offsets,
-                            });
-                        },
-                    )?;
-                }
-            }
-        }
-        OutputPackageSections::DwarfStd {
-            debug_info,
-            debug_abbrev,
-            debug_line,
-            debug_loclists,
-            debug_rnglists,
-            debug_str_offsets,
-            debug_macro,
-            ..
-        } => {
-            let debug_abbrev = append_section(DebugAbbrev, debug_abbrev, true)?
-                .expect("required section didn't return error");
-            let debug_line = append_section(DebugLine, debug_line, false)?;
-            let debug_loclists = append_section(DebugLocLists, debug_loclists, false)?;
-            let debug_rnglists = append_section(DebugRngLists, debug_rnglists, false)?;
-            let debug_macro = append_section(DebugMacro, debug_macro, false)?;
-
-            let debug_str_offsets = append_str_offsets(
-                PackageFormat::DwarfStd,
-                string_table,
-                &dwo_obj,
-                &dwo_dwarf,
-                &mut output.obj,
-                debug_str_offsets,
-            )?;
-
-            let mut iter = dwo_dwarf.units();
-            while let Some(header) = iter.next()? {
-                let unit = dwo_dwarf.unit(header)?;
-                append_unit(
-                    &dwo,
-                    &debug_info_section,
-                    &unit,
-                    &mut output.obj,
-                    |output, dwo_id, unit_data, unit_size| {
-                        let offset = output.append_section_data(
-                            debug_info,
-                            unit_data,
-                            debug_info_section.align(),
-                        );
-                        let debug_info =
-                            Contribution { offset: ContributionOffset(offset), size: unit_size };
-                        cu_index_entries.push(CuIndexEntry {
-                            dwo_id,
-                            kind: CuIndexEntryKind::DwarfStd {
-                                debug_info,
-                                debug_abbrev,
-                                debug_line,
-                                debug_loclists,
-                                debug_rnglists,
-                                debug_str_offsets,
-                                debug_macro,
-                            },
-                        });
-                    },
-                    |output, type_signature, unit_data, unit_size| {
-                        let offset = output.append_section_data(
-                            debug_info,
-                            unit_data,
-                            debug_info_section.align(),
-                        );
-                        let debug_info =
-                            Contribution { offset: ContributionOffset(offset), size: unit_size };
+                    output,
+                    |_, _| { /* no-op, no compilation units in `.debug_types` */ },
+                    |type_signature, debug_info_or_types| {
                         tu_index_entries.push(TuIndexEntry {
                             type_signature,
-                            debug_info_or_types: debug_info,
+                            debug_info_or_types,
                             debug_abbrev,
                             debug_line,
                             debug_str_offsets,
@@ -1286,8 +1202,8 @@ where
     let buckets = bucket(entries);
     debug!(?buckets);
 
-    let num_columns = entries[0].number_of_columns();
-    assert!(entries.iter().all(|e| e.number_of_columns() == num_columns));
+    let num_columns = entries[0].number_of_columns(format);
+    assert!(entries.iter().all(|e| e.number_of_columns(format) == num_columns));
     debug!(?num_columns);
 
     // Write header..
@@ -1331,17 +1247,17 @@ where
     // Write offsets..
     let write_offset = |contrib: Contribution| contrib.offset.0.try_into().unwrap();
     for entry in entries {
-        entry.write_contribution(&mut out, write_offset)?;
+        entry.write_contribution(format, &mut out, write_offset)?;
     }
 
     // Write sizes..
     let write_size = |contrib: Contribution| contrib.size.try_into().unwrap();
     for entry in entries {
-        entry.write_contribution(&mut out, write_size)?;
+        entry.write_contribution(format, &mut out, write_size)?;
     }
 
     // FIXME: use the correct alignment here
-    let _ = output.append_section_data(output_id, &out.into_vec(), 1);
+    let _ = output.append_section_data(output_id, out.slice(), 1);
     Ok(())
 }
 
@@ -1376,6 +1292,7 @@ fn main() -> Result<()> {
 
     for dwo in dwarf_objects {
         process_dwarf_object(
+            format,
             parent_debug_addr.clone(),
             dwo,
             &mut cu_index_entries,
@@ -1389,12 +1306,7 @@ fn main() -> Result<()> {
     }
 
     // Write the merged string table to the `.debug_str.dwo` section.
-    match output.sections {
-        OutputPackageSections::GnuExtension { debug_str, .. }
-        | OutputPackageSections::DwarfStd { debug_str, .. } => {
-            let _ = string_table.write(&mut output.obj, debug_str);
-        }
-    }
+    let _ = string_table.write(&mut output);
 
     // Write `.debug_cu_index` and `.debug_tu_index`
     write_index(endianness, format, &cu_index_entries, &mut output.obj, output.debug_cu_index)?;
