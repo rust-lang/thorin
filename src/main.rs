@@ -12,7 +12,7 @@ use object::{
     BinaryFormat, Endianness, Object, ObjectSection, SectionKind,
 };
 use std::borrow::{Borrow, Cow};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io::{self, BufWriter, Write};
@@ -209,6 +209,10 @@ struct OutputPackage<'file, Endian: gimli::Endianity> {
     /// In-progress string table being accumulated. Used to write final `.debug_str.dwo` and
     /// `.debug_str_offsets.dwo` for each DWARF object.
     string_table: DwpStringTable<Endian>,
+
+    /// `DebugTypeSignature`s of type units that have already been added to the output package,
+    /// checked before adding new TU index entries to de-duplicate type units.
+    seen_type_units: HashSet<DebugTypeSignature>,
 }
 
 impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
@@ -380,6 +384,11 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                 Some(DwarfObjectIdentifier::Type(type_signature)),
                 DwarfObjectIdentifier::Type(target_type_signature),
             ) if type_signature == target_type_signature => {
+                if self.seen_type_units.contains(&type_signature) {
+                    // Return early if a unit with this type signature has already been seen.
+                    return Ok(());
+                }
+
                 let offset = offset.as_debug_types_offset().unwrap().0;
                 let data = section
                     .data_range(offset.try_into().unwrap(), size)?
@@ -393,6 +402,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                     let offset = self.obj.append_section_data(id, data, section.align());
                     let contribution = Contribution { offset: ContributionOffset(offset), size };
                     append_tu_contribution(self, type_signature, contribution);
+                    self.seen_type_units.insert(type_signature);
                 }
 
                 Ok(())
@@ -1303,6 +1313,7 @@ fn create_output_object<'input, 'output>(
         debug_macro: Default::default(),
         cu_index_entries: Default::default(),
         tu_index_entries: Default::default(),
+        seen_type_units: Default::default(),
     })
 }
 
