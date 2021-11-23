@@ -54,6 +54,8 @@ enum DwpError {
     DwarfObjectCompilationUnitWithDwoIdNotSplitUnit,
     #[error("compilation unit in dwarf object with no data")]
     CompilationUnitWithNoData,
+    #[error("no data when reading header of DWARF 5 `.debug_str_offsets.dwo`")]
+    Dwarf5StrOffsetWithoutHeader,
 }
 
 /// DWARF packages come in pre-standard GNU extension format or DWARF 5 standardized format.
@@ -285,12 +287,23 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
         };
         let section_size = section.size();
 
-        // TODO: Write the DWARF 5 string offset table header (how does it work w/r/t concatenation?)
         let mut data = EndianVec::new(self.endian);
 
         let root_header = input_dwarf.units().next()?.context(DwpError::DwarfObjectWithNoUnits)?;
         let encoding = root_header.encoding();
-        let base = DebugStrOffsetsBase::default_for_encoding_and_file(encoding, DwarfFileType::Dwo);
+        // `DebugStrOffsetsBase` knows to skip past the header with DWARF 5.
+        let base: gimli::DebugStrOffsetsBase<usize> =
+            DebugStrOffsetsBase::default_for_encoding_and_file(encoding, DwarfFileType::Dwo);
+
+        // Copy the DWARF 5 header exactly.
+        if self.format == PackageFormat::DwarfStd {
+            // `DebugStrOffsetsBase` should start from after DWARF 5's header, check that.
+            assert!(base.0 != 0);
+            let header_data = section
+                .data_range(0, base.0.try_into().expect("base offset is larger than a u64"))?
+                .ok_or(DwpError::Dwarf5StrOffsetWithoutHeader)?;
+            data.write(&header_data)?;
+        }
 
         let entry_size = match encoding.format {
             Format::Dwarf32 => 4,
@@ -1380,11 +1393,7 @@ fn main() -> Result<()> {
     let (parent_debug_addr, dwarf_objects, version) =
         parse_executable(&arena_data, &arena_relocations, &obj)?;
 
-    let format = if version >= 5 {
-        PackageFormat::DwarfStd
-    } else {
-        PackageFormat::GnuExtension
-    };
+    let format = if version >= 5 { PackageFormat::DwarfStd } else { PackageFormat::GnuExtension };
 
     let mut output = create_output_object(format, &obj)?;
 
