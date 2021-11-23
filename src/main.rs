@@ -9,7 +9,7 @@ use indexmap::IndexSet;
 use memmap2::Mmap;
 use object::{
     write::{self, SectionId, StreamingBuffer},
-    Architecture, BinaryFormat, Endianness, Object, ObjectSection, SectionKind,
+    BinaryFormat, Endianness, Object, ObjectSection, SectionKind,
 };
 use std::borrow::{Borrow, Cow};
 use std::collections::HashMap;
@@ -69,6 +69,15 @@ enum PackageFormat {
     DwarfStd,
 }
 
+impl fmt::Display for PackageFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            PackageFormat::GnuExtension => write!(f, "GNU Extension"),
+            PackageFormat::DwarfStd => write!(f, "Dwarf Standard"),
+        }
+    }
+}
+
 /// Helper trait for types that have a corresponding `gimli::SectionId`.
 trait HasGimliId {
     /// Return the corresponding `gimli::SectionId`.
@@ -102,6 +111,10 @@ struct LazySectionId<Id: HasGimliId> {
 }
 
 impl<Id: HasGimliId> LazySectionId<Id> {
+    /// Return the `SectionId` for the current section, creating it if it does not exist.
+    ///
+    /// Don't call this function if the returned id isn't going to be used, otherwise an empty
+    /// section would be created.
     fn get<'file>(&mut self, obj: &mut write::Object<'file>) -> SectionId {
         match self.id {
             Some(id) => id,
@@ -119,9 +132,14 @@ impl<Id: HasGimliId> LazySectionId<Id> {
 }
 
 /// In-progress DWARF package being produced.
-struct OutputPackage<'file> {
+struct OutputPackage<'file, Endian: gimli::Endianity> {
     /// Object file being created.
     obj: write::Object<'file>,
+
+    /// Format of the DWARF package being created.
+    format: PackageFormat,
+    /// Endianness of the DWARF package being created.
+    endian: gimli::RunTimeEndian,
 
     /// Identifier for the `.debug_cu_index.dwo` section in the object file being created. Format
     /// depends on whether this is a GNU extension-flavoured package or DWARF 5-flavoured package.
@@ -182,6 +200,357 @@ struct OutputPackage<'file> {
     ///
     /// Contains concatenated `.debug_macro.dwo` sections from input DWARF objects.
     debug_macro: LazySectionId<DebugMacro>,
+
+    /// Compilation unit index entries (offsets + sizes) being accumulated.
+    cu_index_entries: Vec<CuIndexEntry>,
+    /// Type unit index entries (offsets + sizes) being accumulated.
+    tu_index_entries: Vec<TuIndexEntry>,
+
+    /// In-progress string table being accumulated. Used to write final `.debug_str.dwo` and
+    /// `.debug_str_offsets.dwo` for each DWARF object.
+    string_table: DwpStringTable<Endian>,
+}
+
+impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
+    /// Return the `SectionId` corresponding to a `gimli::SectionId`, creating a id if it hasn't
+    /// been created before.
+    ///
+    /// Don't call this function if the returned id isn't going to be used, otherwise an empty
+    /// section would be created.
+    fn section(&mut self, id: gimli::SectionId) -> SectionId {
+        use gimli::SectionId::*;
+        match id {
+            DebugCuIndex => self.debug_cu_index,
+            DebugTuIndex => self.debug_tu_index,
+            DebugInfo => self.debug_info.get(&mut self.obj),
+            DebugAbbrev => self.debug_abbrev.get(&mut self.obj),
+            DebugStr => self.debug_str.get(&mut self.obj),
+            DebugTypes => self.debug_types.get(&mut self.obj),
+            DebugLine => self.debug_line.get(&mut self.obj),
+            DebugLoc => self.debug_loc.get(&mut self.obj),
+            DebugLocLists => self.debug_loclists.get(&mut self.obj),
+            DebugRngLists => self.debug_rnglists.get(&mut self.obj),
+            DebugStrOffsets => self.debug_str_offsets.get(&mut self.obj),
+            DebugMacinfo => self.debug_macinfo.get(&mut self.obj),
+            DebugMacro => self.debug_macro.get(&mut self.obj),
+            _ => panic!("section invalid in dwarf package"),
+        }
+    }
+
+    /// Append the contents of a section from the input DWARF object to the equivalent section in
+    /// the output object, with no further processing.
+    #[tracing::instrument(level = "trace", skip(input))]
+    fn append_section<'input, 'output>(
+        &mut self,
+        input: &object::File<'input>,
+        input_id: gimli::SectionId,
+        required: bool,
+    ) -> Result<Option<Contribution>> {
+        let name = dwo_name(input_id);
+        match input.section_by_name(name) {
+            Some(section) => {
+                let size = section.size();
+                let data = section.data()?;
+                if !data.is_empty() {
+                    let id = self.section(input_id);
+                    let offset = self.obj.append_section_data(id, &data, section.align());
+                    Ok(Some(Contribution { offset: ContributionOffset(offset), size }))
+                } else {
+                    Ok(None)
+                }
+            }
+            None if required => Err(anyhow!(DwpError::DwarfObjectMissingSection(name.to_string()))),
+            None => Ok(None),
+        }
+    }
+
+    /// Read the string offsets from `.debug_str_offsets.dwo` in the DWARF object, adding each to
+    /// the in-progress `.debug_str` (`DwpStringTable`) and building a new `.debug_str_offsets.dwo`
+    /// to be the current DWARF object's contribution to the DWARF package.
+    #[tracing::instrument(level = "trace", skip(input, input_dwarf))]
+    fn append_str_offsets<'input, 'output, 'arena: 'input>(
+        &mut self,
+        input: &object::File<'input>,
+        input_dwarf: &gimli::Dwarf<DwpReader<'arena>>,
+    ) -> Result<Option<Contribution>> {
+        let section_name = gimli::SectionId::DebugStrOffsets.dwo_name().unwrap();
+        let section = match input.section_by_name(section_name) {
+            Some(section) => section,
+            // `.debug_str_offsets.dwo` is an optional section.
+            None => return Ok(None),
+        };
+        let section_size = section.size();
+
+        // TODO: Write the DWARF 5 string offset table header (how does it work w/r/t concatenation?)
+        let mut data = EndianVec::new(self.endian);
+
+        let root_header = input_dwarf.units().next()?.context(DwpError::DwarfObjectWithNoUnits)?;
+        let encoding = root_header.encoding();
+        let base = DebugStrOffsetsBase::default_for_encoding_and_file(encoding, DwarfFileType::Dwo);
+
+        let entry_size = match encoding.format {
+            Format::Dwarf32 => 4,
+            Format::Dwarf64 => 8,
+        };
+
+        let num_elements = section_size / entry_size;
+        debug!(?section_size, ?num_elements);
+
+        for i in 0..num_elements {
+            let dwo_index = DebugStrOffsetsIndex(i as usize);
+            let dwo_offset =
+                input_dwarf.debug_str_offsets.get_str_offset(encoding.format, base, dwo_index)?;
+            let dwo_str = input_dwarf.debug_str.get_str(dwo_offset)?;
+            let dwo_str = dwo_str.to_string()?;
+
+            let dwp_offset = self.string_table.get_or_insert(dwo_str.as_ref())?;
+            debug!(?i, ?dwo_str, "dwo_offset={:#x} dwp_offset={:#x}", dwo_offset.0, dwp_offset.0);
+
+            match encoding.format {
+                Format::Dwarf32 => {
+                    data.write_u32(
+                        dwp_offset.0.try_into().context(DwpError::DwpStrOffsetOutOfRange)?,
+                    )?;
+                }
+                Format::Dwarf64 => {
+                    data.write_u64(
+                        dwp_offset.0.try_into().context(DwpError::DwpStrOffsetOutOfRange)?,
+                    )?;
+                }
+            }
+        }
+
+        if num_elements > 0 {
+            let id = self.debug_str_offsets.get(&mut self.obj);
+            let offset = self.obj.append_section_data(id, data.slice(), section.align());
+            Ok(Some(Contribution {
+                offset: ContributionOffset(offset),
+                size: section_size.try_into().expect("too large for u32"),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Append a unit from the input DWARF object to the `.debug_info` (or `.debug_types`) section in
+    /// the output object. Only appends unit if it has a `DwarfObjectIdentifier` matching the target
+    /// `DwarfObjectIdentifier`.
+    #[tracing::instrument(
+        level = "trace",
+        skip(section, unit, append_cu_contribution, append_tu_contribution)
+    )]
+    fn append_unit<'input, 'arena, 'output: 'arena, CuOp, Sect, TuOp>(
+        &mut self,
+        dwo: &TargetDwarfObject,
+        section: &Sect,
+        unit: &gimli::Unit<DwpReader<'arena>>,
+        mut append_cu_contribution: CuOp,
+        mut append_tu_contribution: TuOp,
+    ) -> Result<()>
+    where
+        CuOp: FnMut(&mut Self, DwoId, Contribution),
+        TuOp: FnMut(&mut Self, DebugTypeSignature, Contribution),
+        Sect: ObjectSection<'input>,
+    {
+        let size: u64 = unit.header.length_including_self().try_into().unwrap();
+        let offset = unit.header.offset();
+
+        let identifier = dwo_identifier_of_unit(&unit);
+        match (unit.header.type_(), identifier, dwo.identifier) {
+            (
+                UnitType::Compilation | UnitType::SplitCompilation(..),
+                Some(DwarfObjectIdentifier::Compilation(dwo_id)),
+                DwarfObjectIdentifier::Compilation(target_dwo_id),
+            ) if dwo_id == target_dwo_id => {
+                let offset = offset.as_debug_info_offset().unwrap().0;
+                let data = section
+                    .data_range(offset.try_into().unwrap(), size)?
+                    .ok_or(DwpError::CompilationUnitWithNoData)?;
+
+                if !data.is_empty() {
+                    let id = self.debug_info.get(&mut self.obj);
+                    let offset = self.obj.append_section_data(id, data, section.align());
+                    let contribution = Contribution { offset: ContributionOffset(offset), size };
+                    append_cu_contribution(self, dwo_id, contribution);
+                }
+                Ok(())
+            }
+            (
+                UnitType::Compilation | UnitType::SplitType { .. },
+                Some(DwarfObjectIdentifier::Type(type_signature)),
+                DwarfObjectIdentifier::Type(target_type_signature),
+            ) if type_signature == target_type_signature => {
+                let offset = offset.as_debug_types_offset().unwrap().0;
+                let data = section
+                    .data_range(offset.try_into().unwrap(), size)?
+                    .ok_or(DwpError::CompilationUnitWithNoData)?;
+
+                if !data.is_empty() {
+                    let id = match self.format {
+                        PackageFormat::GnuExtension => self.debug_types.get(&mut self.obj),
+                        PackageFormat::DwarfStd => self.debug_info.get(&mut self.obj),
+                    };
+                    let offset = self.obj.append_section_data(id, data, section.align());
+                    let contribution = Contribution { offset: ContributionOffset(offset), size };
+                    append_tu_contribution(self, type_signature, contribution);
+                }
+
+                Ok(())
+            }
+            (_, Some(..), _) => {
+                Err(anyhow!(DwpError::DwarfObjectCompilationUnitWithDwoIdNotSplitUnit))
+            }
+            (_, None, _) => Ok(()),
+        }
+    }
+
+    /// Process a DWARF object. Copies relevant sections, compilation/type units and strings from DWARF
+    /// object into output object.
+    #[tracing::instrument(
+        level = "trace",
+        skip(parent_debug_addr, arena_data, arena_mmap, arena_relocations)
+    )]
+    fn append_dwarf_object<'input, 'output, 'arena: 'input>(
+        &mut self,
+        arena_data: &'arena Arena<Cow<'input, [u8]>>,
+        arena_mmap: &'arena Arena<Mmap>,
+        arena_relocations: &'arena Arena<RelocationMap>,
+        parent_debug_addr: DebugAddr<DwpReader<'arena>>,
+        dwo: TargetDwarfObject,
+    ) -> Result<()> {
+        use gimli::SectionId::*;
+
+        let dwo_obj = load_object_file(&arena_mmap, &dwo.path)?;
+
+        // Concatenate contents of sections from the DWARF object into the corresponding section in
+        // the output.
+        let debug_abbrev = self
+            .append_section(&dwo_obj, DebugAbbrev, true)?
+            .expect("required section didn't return error");
+        let debug_line = self.append_section(&dwo_obj, DebugLine, false)?;
+        let debug_macro = self.append_section(&dwo_obj, DebugMacro, false)?;
+
+        let (debug_loc, debug_macinfo, debug_loclists, debug_rnglists) = match self.format {
+            PackageFormat::GnuExtension => {
+                // Only `.debug_loc.dwo` and `.debug_macinfo.dwo` with the GNU extension.
+                let debug_loc = self.append_section(&dwo_obj, DebugLoc, false)?;
+                let debug_macinfo = self.append_section(&dwo_obj, DebugMacinfo, false)?;
+                (debug_loc, debug_macinfo, None, None)
+            }
+            PackageFormat::DwarfStd => {
+                // Only `.debug_loclists.dwo` and `.debug_rnglists.dwo` with DWARF 5.
+                let debug_loclists = self.append_section(&dwo_obj, DebugLocLists, false)?;
+                let debug_rnglists = self.append_section(&dwo_obj, DebugRngLists, false)?;
+                (None, None, debug_loclists, debug_rnglists)
+            }
+        };
+
+        let mut load_dwo_section = |id: gimli::SectionId| -> Result<_> {
+            load_file_section(id, &dwo_obj, true, &arena_data, &arena_relocations)
+        };
+
+        let mut dwo_dwarf = gimli::Dwarf::load(&mut load_dwo_section)?;
+        dwo_dwarf.debug_addr = parent_debug_addr;
+
+        // Concatenate string offsets from the DWARF object into the `.debug_str_offsets` section in
+        // the output, rewriting offsets to be based on the new, merged string table.
+        let debug_str_offsets = self.append_str_offsets(&dwo_obj, &dwo_dwarf)?;
+
+        let debug_info_name = gimli::SectionId::DebugInfo.dwo_name().unwrap();
+        let debug_info_section = dwo_obj
+            .section_by_name(debug_info_name)
+            .with_context(|| DwpError::DwarfObjectMissingSection(debug_info_name.to_string()))?;
+
+        // Append compilation (and type units, in DWARF 5) from `.debug_info`.
+        let mut iter = dwo_dwarf.units();
+        while let Some(header) = iter.next()? {
+            let unit = dwo_dwarf.unit(header)?;
+            self.append_unit(
+                &dwo,
+                &debug_info_section,
+                &unit,
+                |this, dwo_id, debug_info| {
+                    this.cu_index_entries.push(CuIndexEntry {
+                        dwo_id,
+                        debug_info,
+                        debug_abbrev,
+                        debug_line,
+                        debug_loc,
+                        debug_loclists,
+                        debug_rnglists,
+                        debug_str_offsets,
+                        debug_macinfo,
+                        debug_macro,
+                    });
+                },
+                |this, type_signature, debug_info| {
+                    this.tu_index_entries.push(TuIndexEntry {
+                        type_signature,
+                        debug_info_or_types: debug_info,
+                        debug_abbrev,
+                        debug_line,
+                        debug_str_offsets,
+                    });
+                },
+            )?;
+        }
+
+        // Append type units from `.debug_info` with the GNU extension.
+        if self.format == PackageFormat::GnuExtension {
+            let debug_types_name = gimli::SectionId::DebugTypes.dwo_name().unwrap();
+            if let Some(debug_types_section) = dwo_obj.section_by_name(debug_types_name) {
+                let mut iter = dwo_dwarf.type_units();
+                while let Some(header) = iter.next()? {
+                    let unit = dwo_dwarf.unit(header)?;
+                    self.append_unit(
+                        &dwo,
+                        &debug_types_section,
+                        &unit,
+                        |_, _, _| { /* no-op, no compilation units in `.debug_types` */ },
+                        |this, type_signature, debug_info_or_types| {
+                            this.tu_index_entries.push(TuIndexEntry {
+                                type_signature,
+                                debug_info_or_types,
+                                debug_abbrev,
+                                debug_line,
+                                debug_str_offsets,
+                            });
+                        },
+                    )?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn emit(mut self, buffer: &mut dyn object::write::WritableBuffer) -> Result<()> {
+        // Write `.debug_str` to the object.
+        let _ = self.string_table.write(&mut self.debug_str, &mut self.obj);
+
+        // Write `.debug_{cu,tu}_index` sections to the object.
+        self.cu_index_entries.write_index(
+            self.endian,
+            self.format,
+            &mut self.obj,
+            self.debug_cu_index,
+        )?;
+        self.tu_index_entries.write_index(
+            self.endian,
+            self.format,
+            &mut self.obj,
+            self.debug_tu_index,
+        )?;
+
+        // Write the contents of the entire object to the buffer.
+        self.obj.emit(buffer).map_err(From::from)
+    }
+}
+
+impl<'file, Endian: gimli::Endianity> fmt::Debug for OutputPackage<'file, Endian> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "OutputPackage({})", self.format)
+    }
 }
 
 /// New-type'd index (constructed from `gimli::DwoID`) with a custom `Debug` implementation to
@@ -306,12 +675,16 @@ impl<E: gimli::Endianity> DwpStringTable<E> {
 
     /// Write the accumulated `.debug_str` section to an object file, returns the offset of the
     /// section in the object (if there was a `.debug_str` section to write at all).
-    fn write<'output>(self, output: &mut OutputPackage<'output>) -> Option<u64> {
+    fn write<'output>(
+        self,
+        debug_str: &mut LazySectionId<DebugStr>,
+        obj: &mut write::Object<'output>,
+    ) -> Option<u64> {
         let data = self.debug_str.0.slice();
         if !data.is_empty() {
             // FIXME: what is the correct way to determine this alignment
-            let id = output.debug_str.get(&mut output.obj);
-            Some(output.obj.append_section_data(id, data, 1))
+            let id = debug_str.get(obj);
+            Some(obj.append_section_data(id, data, 1))
         } else {
             None
         }
@@ -600,6 +973,99 @@ impl IndexEntry for CuIndexEntry {
     }
 }
 
+trait IndexCollection<Entry: IndexEntry> {
+    /// Write `.debug_{cu,tu}_index` to the output object.
+    fn write_index<'output, Endian>(
+        &self,
+        endianness: Endian,
+        format: PackageFormat,
+        output: &mut write::Object<'output>,
+        output_id: SectionId,
+    ) -> Result<()>
+    where
+        Endian: gimli::Endianity;
+}
+
+impl<Entry: IndexEntry> IndexCollection<Entry> for Vec<Entry> {
+    fn write_index<'output, Endian>(
+        &self,
+        endianness: Endian,
+        format: PackageFormat,
+        output: &mut write::Object<'output>,
+        output_id: SectionId,
+    ) -> Result<()>
+    where
+        Endian: gimli::Endianity,
+    {
+        if self.len() == 0 {
+            return Ok(());
+        }
+
+        let mut out = EndianVec::new(endianness);
+
+        let buckets = bucket(self);
+        debug!(?buckets);
+
+        let num_columns = self[0].number_of_columns(format);
+        assert!(self.iter().all(|e| e.number_of_columns(format) == num_columns));
+        debug!(?num_columns);
+
+        // Write header..
+        match format {
+            PackageFormat::GnuExtension => {
+                // GNU Extension
+                out.write_u32(2)?;
+            }
+            PackageFormat::DwarfStd => {
+                // DWARF 5
+                out.write_u32(5)?;
+                // Reserved padding
+                out.write_u32(0)?;
+            }
+        }
+
+        // Columns (e.g. info, abbrev, loc, etc.)
+        out.write_u32(num_columns)?;
+        // Number of units
+        out.write_u32(self.len().try_into().unwrap())?;
+        // Number of buckets
+        out.write_u32(buckets.len().try_into().unwrap())?;
+
+        // Write signatures..
+        for i in &buckets {
+            if *i > 0 {
+                out.write_u64(self[(*i - 1) as usize].signature())?;
+            } else {
+                out.write_u64(0)?;
+            }
+        }
+
+        // Write indices..
+        for i in &buckets {
+            out.write_u32(*i)?;
+        }
+
+        // Write column headers..
+        self[0].write_header(format, &mut out)?;
+
+        // Write offsets..
+        let write_offset = |contrib: Contribution| contrib.offset.0.try_into().unwrap();
+        for entry in self {
+            entry.write_contribution(format, &mut out, write_offset)?;
+        }
+
+        // Write sizes..
+        let write_size = |contrib: Contribution| contrib.size.try_into().unwrap();
+        for entry in self {
+            entry.write_contribution(format, &mut out, write_size)?;
+        }
+
+        // FIXME: use the correct alignment here
+        let _ = output.append_section_data(output_id, out.slice(), 1);
+        Ok(())
+    }
+}
+
 #[derive(Debug, StructOpt)]
 #[structopt(name = "rust-dwp", about = "merge split dwarf (.dwo) files")]
 struct Opt {
@@ -639,12 +1105,11 @@ fn load_object_file<'input, 'arena: 'input>(
         .with_context(|| format!("failed to parse file at {}", path.display()))
 }
 
-/// Returns the `RunTimeEndian` which matches the endianness of the object file.
-fn runtime_endian_of_object<'a>(obj: &object::File<'a>) -> RunTimeEndian {
-    if obj.is_little_endian() {
-        RunTimeEndian::Little
-    } else {
-        RunTimeEndian::Big
+/// Returns the gimli `RunTimeEndian` corresponding to a object `Endianness`.
+fn runtime_endian_from_endianness<'a>(endianness: Endianness) -> RunTimeEndian {
+    match endianness {
+        Endianness::Little => RunTimeEndian::Little,
+        Endianness::Big => RunTimeEndian::Big,
     }
 }
 
@@ -673,7 +1138,8 @@ fn load_file_section<'input, 'arena: 'input>(
     };
 
     let data_ref = (*arena_data.alloc(data)).borrow();
-    let reader = gimli::EndianSlice::new(data_ref, runtime_endian_of_object(obj));
+    let reader =
+        gimli::EndianSlice::new(data_ref, runtime_endian_from_endianness(obj.endianness()));
     let section = reader;
     let relocations = (*arena_relocations.alloc(relocations)).borrow();
     Ok(Relocate { relocations, section, reader })
@@ -764,10 +1230,10 @@ fn dwo_id_and_path_of_unit<R: gimli::Reader>(
 /// DWARF, their `DwoId` and constructed paths are collected.
 #[tracing::instrument(level = "trace", skip(obj, arena_data, arena_relocations))]
 fn parse_executable<'input, 'arena: 'input>(
-    obj: &object::File<'input>,
     arena_data: &'arena Arena<Cow<'input, [u8]>>,
     arena_relocations: &'arena Arena<RelocationMap>,
-) -> Result<(DebugAddr<DwpReader<'arena>>, Vec<TargetDwarfObject>)> {
+    obj: &object::File<'input>,
+) -> Result<(DebugAddr<DwpReader<'arena>>, Vec<TargetDwarfObject>, u16)> {
     let mut dwarf_objects = Vec::new();
 
     let mut load_section = |id: gimli::SectionId| -> Result<_> {
@@ -775,6 +1241,12 @@ fn parse_executable<'input, 'arena: 'input>(
     };
 
     let dwarf = gimli::Dwarf::load(&mut load_section)?;
+
+    let version = {
+        let root_header = dwarf.units().next()?.context(DwpError::DwarfObjectWithNoUnits)?;
+        root_header.version()
+    };
+
     let mut iter = dwarf.units();
     while let Some(header) = iter.next()? {
         let unit = dwarf.unit(header)?;
@@ -783,31 +1255,41 @@ fn parse_executable<'input, 'arena: 'input>(
         }
     }
 
-    Ok((dwarf.debug_addr, dwarf_objects))
+    Ok((dwarf.debug_addr, dwarf_objects, version))
 }
 
 /// Create an object file with empty sections that will be later populated from DWARF object files.
-#[tracing::instrument(level = "trace")]
-fn create_output_object<'file>(
+#[tracing::instrument(level = "trace", skip(input_executable))]
+fn create_output_object<'input, 'output>(
     format: PackageFormat,
-    architecture: Architecture,
-    endianness: Endianness,
-) -> Result<OutputPackage<'file>> {
+    input_executable: &object::File<'input>,
+) -> Result<OutputPackage<'output, RunTimeEndian>> {
     use gimli::SectionId::*;
 
-    let mut obj = write::Object::new(BinaryFormat::Elf, architecture, endianness);
+    let mut obj = write::Object::new(
+        BinaryFormat::Elf,
+        input_executable.architecture(),
+        input_executable.endianness(),
+    );
 
     let mut add_section = |gimli_id: gimli::SectionId| -> SectionId {
         obj.add_section(Vec::new(), dwo_name(gimli_id).as_bytes().to_vec(), SectionKind::Debug)
     };
 
+    let endian = runtime_endian_from_endianness(input_executable.endianness());
+
     let debug_cu_index = add_section(DebugCuIndex);
     let debug_tu_index = add_section(DebugTuIndex);
 
+    let string_table = DwpStringTable::new(endian);
+
     Ok(OutputPackage {
         obj,
+        format,
+        endian,
         debug_cu_index,
         debug_tu_index,
+        string_table,
         debug_info: Default::default(),
         debug_abbrev: Default::default(),
         debug_str: Default::default(),
@@ -819,324 +1301,9 @@ fn create_output_object<'file>(
         debug_str_offsets: Default::default(),
         debug_macinfo: Default::default(),
         debug_macro: Default::default(),
+        cu_index_entries: Default::default(),
+        tu_index_entries: Default::default(),
     })
-}
-
-/// Read the string offsets from `.debug_str_offsets.dwo` in the DWARF object, adding each to the
-/// in-progress `.debug_str` (`DwpStringTable`) and building a new `.debug_str_offsets.dwo` to be
-/// the current DWARF object's contribution to the DWARF package.
-#[tracing::instrument(level = "trace", skip(string_table, input, input_dwarf, output))]
-fn append_str_offsets<'input, 'output, 'arena: 'input, Endian: gimli::Endianity>(
-    format: PackageFormat,
-    string_table: &mut DwpStringTable<Endian>,
-    input: &object::File<'input>,
-    input_dwarf: &gimli::Dwarf<DwpReader<'arena>>,
-    output: &mut OutputPackage<'output>,
-) -> Result<Option<Contribution>> {
-    let section_name = gimli::SectionId::DebugStrOffsets.dwo_name().unwrap();
-    let section = match input.section_by_name(section_name) {
-        Some(section) => section,
-        // `.debug_str_offsets.dwo` is an optional section.
-        None => return Ok(None),
-    };
-    let section_size = section.size();
-
-    // TODO: Write the DWARF 5 string offset table header (how does it work w/r/t concatenation?)
-    let mut data = EndianVec::new(runtime_endian_of_object(input));
-
-    let root_header = input_dwarf.units().next()?.context(DwpError::DwarfObjectWithNoUnits)?;
-    let encoding = root_header.encoding();
-    let base = DebugStrOffsetsBase::default_for_encoding_and_file(encoding, DwarfFileType::Dwo);
-
-    let entry_size = match encoding.format {
-        Format::Dwarf32 => 4,
-        Format::Dwarf64 => 8,
-    };
-
-    let num_elements = section_size / entry_size;
-    debug!(?section_size, ?num_elements);
-
-    for i in 0..num_elements {
-        let dwo_index = DebugStrOffsetsIndex(i as usize);
-        let dwo_offset =
-            input_dwarf.debug_str_offsets.get_str_offset(encoding.format, base, dwo_index)?;
-        let dwo_str = input_dwarf.debug_str.get_str(dwo_offset)?;
-        let dwo_str = dwo_str.to_string()?;
-
-        let dwp_offset = string_table.get_or_insert(dwo_str.as_ref())?;
-        debug!(?i, ?dwo_str, "dwo_offset={:#x} dwp_offset={:#x}", dwo_offset.0, dwp_offset.0);
-
-        match encoding.format {
-            Format::Dwarf32 => {
-                data.write_u32(dwp_offset.0.try_into().context(DwpError::DwpStrOffsetOutOfRange)?)?;
-            }
-            Format::Dwarf64 => {
-                data.write_u64(dwp_offset.0.try_into().context(DwpError::DwpStrOffsetOutOfRange)?)?;
-            }
-        }
-    }
-
-    if num_elements > 0 {
-        let id = output.debug_str_offsets.get(&mut output.obj);
-        let offset = output.obj.append_section_data(id, data.slice(), section.align());
-        Ok(Some(Contribution {
-            offset: ContributionOffset(offset),
-            size: section_size.try_into().expect("too large for u32"),
-        }))
-    } else {
-        Ok(None)
-    }
-}
-
-/// Append a unit from the input DWARF object to the `.debug_info` (or `.debug_types`) section in
-/// the output object. Only appends unit if it has a `DwarfObjectIdentifier` matching the target
-/// `DwarfObjectIdentifier`.
-#[tracing::instrument(level = "trace", skip_all)]
-fn append_unit<'input, 'arena, 'output: 'arena, CuOp, Sect, TuOp>(
-    format: PackageFormat,
-    dwo: &TargetDwarfObject,
-    section: &Sect,
-    unit: &gimli::Unit<DwpReader<'arena>>,
-    output: &mut OutputPackage<'output>,
-    mut append_cu_contribution: CuOp,
-    mut append_tu_contribution: TuOp,
-) -> Result<()>
-where
-    CuOp: FnMut(DwoId, Contribution),
-    TuOp: FnMut(DebugTypeSignature, Contribution),
-    Sect: ObjectSection<'input>,
-{
-    let size: u64 = unit.header.length_including_self().try_into().unwrap();
-    let offset = unit.header.offset();
-
-    let identifier = dwo_identifier_of_unit(&unit);
-    match (unit.header.type_(), identifier, dwo.identifier) {
-        (
-            UnitType::Compilation | UnitType::SplitCompilation(..),
-            Some(DwarfObjectIdentifier::Compilation(dwo_id)),
-            DwarfObjectIdentifier::Compilation(target_dwo_id),
-        ) if dwo_id == target_dwo_id => {
-            let offset = offset.as_debug_info_offset().unwrap().0;
-            let data = section
-                .data_range(offset.try_into().unwrap(), size)?
-                .ok_or(DwpError::CompilationUnitWithNoData)?;
-
-            if !data.is_empty() {
-                let id = output.debug_info.get(&mut output.obj);
-                let offset = output.obj.append_section_data(id, data, section.align());
-                let contribution = Contribution { offset: ContributionOffset(offset), size };
-                append_cu_contribution(dwo_id, contribution);
-            }
-            Ok(())
-        }
-        (
-            UnitType::Compilation | UnitType::SplitType { .. },
-            Some(DwarfObjectIdentifier::Type(type_signature)),
-            DwarfObjectIdentifier::Type(target_type_signature),
-        ) if type_signature == target_type_signature => {
-            let offset = offset.as_debug_types_offset().unwrap().0;
-            let data = section
-                .data_range(offset.try_into().unwrap(), size)?
-                .ok_or(DwpError::CompilationUnitWithNoData)?;
-
-            if !data.is_empty() {
-                let id = match format {
-                    PackageFormat::GnuExtension => output.debug_types.get(&mut output.obj),
-                    PackageFormat::DwarfStd => output.debug_info.get(&mut output.obj),
-                };
-                let offset = output.obj.append_section_data(id, data, section.align());
-                let contribution = Contribution { offset: ContributionOffset(offset), size };
-                append_tu_contribution(type_signature, contribution);
-            }
-
-            Ok(())
-        }
-        (_, Some(..), _) => Err(anyhow!(DwpError::DwarfObjectCompilationUnitWithDwoIdNotSplitUnit)),
-        (_, None, _) => Ok(()),
-    }
-}
-
-/// Append the contents of a section from the input DWARF object to the equivalent section in the
-/// output object.
-#[tracing::instrument(level = "trace", skip(input, output, output_id))]
-fn append_section<'input, 'output, Id: HasGimliId>(
-    input: &object::File<'input>,
-    input_id: gimli::SectionId,
-    output: &mut write::Object<'output>,
-    output_id: &mut LazySectionId<Id>,
-    required: bool,
-) -> Result<Option<Contribution>> {
-    let name = dwo_name(input_id);
-    match input.section_by_name(name) {
-        Some(section) => {
-            let size = section.size();
-            let data = section.data()?;
-            if !data.is_empty() {
-                let id = output_id.get(output);
-                let offset = output.append_section_data(id, &data, section.align());
-                Ok(Some(Contribution { offset: ContributionOffset(offset), size }))
-            } else {
-                Ok(None)
-            }
-        }
-        None if required => Err(anyhow!(DwpError::DwarfObjectMissingSection(name.to_string()))),
-        None => Ok(None),
-    }
-}
-
-/// Process a DWARF object. Copies relevant sections, compilation/type units and strings from DWARF
-/// object into output object.
-#[tracing::instrument(
-    level = "trace",
-    skip(parent_debug_addr, string_table, output, arena_data, arena_mmap, arena_relocations)
-)]
-fn process_dwarf_object<'input, 'output, 'arena: 'input, Endian: gimli::Endianity>(
-    format: PackageFormat,
-    parent_debug_addr: DebugAddr<DwpReader<'arena>>,
-    dwo: TargetDwarfObject,
-    cu_index_entries: &mut Vec<CuIndexEntry>,
-    tu_index_entries: &mut Vec<TuIndexEntry>,
-    string_table: &mut DwpStringTable<Endian>,
-    output: &mut OutputPackage<'output>,
-    arena_data: &'arena Arena<Cow<'input, [u8]>>,
-    arena_mmap: &'arena Arena<Mmap>,
-    arena_relocations: &'arena Arena<RelocationMap>,
-) -> Result<()> {
-    use gimli::SectionId::*;
-
-    let dwo_obj = load_object_file(&arena_mmap, &dwo.path)?;
-
-    // Concatenate contents of sections from the DWARF object into the corresponding section in
-    // the output.
-    let debug_abbrev =
-        append_section(&dwo_obj, DebugAbbrev, &mut output.obj, &mut output.debug_abbrev, true)?
-            .expect("required section didn't return error");
-    let debug_line =
-        append_section(&dwo_obj, DebugLine, &mut output.obj, &mut output.debug_line, false)?;
-    let debug_macro =
-        append_section(&dwo_obj, DebugMacro, &mut output.obj, &mut output.debug_macro, false)?;
-
-    let (debug_loc, debug_macinfo, debug_loclists, debug_rnglists) = match format {
-        PackageFormat::GnuExtension => {
-            // Only `.debug_loc.dwo` and `.debug_macinfo.dwo` with the GNU extension.
-            let debug_loc =
-                append_section(&dwo_obj, DebugLoc, &mut output.obj, &mut output.debug_loc, false)?;
-            let debug_macinfo = append_section(
-                &dwo_obj,
-                DebugMacinfo,
-                &mut output.obj,
-                &mut output.debug_macinfo,
-                false,
-            )?;
-            (debug_loc, debug_macinfo, None, None)
-        }
-        PackageFormat::DwarfStd => {
-            // Only `.debug_loclists.dwo` and `.debug_rnglists.dwo` with DWARF 5.
-            let debug_loclists = append_section(
-                &dwo_obj,
-                DebugLocLists,
-                &mut output.obj,
-                &mut output.debug_loclists,
-                false,
-            )?;
-            let debug_rnglists = append_section(
-                &dwo_obj,
-                DebugRngLists,
-                &mut output.obj,
-                &mut output.debug_rnglists,
-                false,
-            )?;
-            (None, None, debug_loclists, debug_rnglists)
-        }
-    };
-
-    let mut load_dwo_section = |id: gimli::SectionId| -> Result<_> {
-        load_file_section(id, &dwo_obj, true, &arena_data, &arena_relocations)
-    };
-
-    let mut dwo_dwarf = gimli::Dwarf::load(&mut load_dwo_section)?;
-    dwo_dwarf.debug_addr = parent_debug_addr;
-
-    // Concatenate string offsets from the DWARF object into the `.debug_str_offsets` section in
-    // the output, rewriting offsets to be based on the new, merged string table.
-    let debug_str_offsets = append_str_offsets(
-        PackageFormat::GnuExtension,
-        string_table,
-        &dwo_obj,
-        &dwo_dwarf,
-        output,
-    )?;
-
-    let debug_info_name = gimli::SectionId::DebugInfo.dwo_name().unwrap();
-    let debug_info_section = dwo_obj
-        .section_by_name(debug_info_name)
-        .with_context(|| DwpError::DwarfObjectMissingSection(debug_info_name.to_string()))?;
-
-    // Append compilation (and type units, in DWARF 5) from `.debug_info`.
-    let mut iter = dwo_dwarf.units();
-    while let Some(header) = iter.next()? {
-        let unit = dwo_dwarf.unit(header)?;
-        append_unit(
-            format,
-            &dwo,
-            &debug_info_section,
-            &unit,
-            output,
-            |dwo_id, debug_info| {
-                cu_index_entries.push(CuIndexEntry {
-                    dwo_id,
-                    debug_info,
-                    debug_abbrev,
-                    debug_line,
-                    debug_loc,
-                    debug_loclists,
-                    debug_rnglists,
-                    debug_str_offsets,
-                    debug_macinfo,
-                    debug_macro,
-                });
-            },
-            |type_signature, debug_info| {
-                tu_index_entries.push(TuIndexEntry {
-                    type_signature,
-                    debug_info_or_types: debug_info,
-                    debug_abbrev,
-                    debug_line,
-                    debug_str_offsets,
-                });
-            },
-        )?;
-    }
-
-    // Append type units from `.debug_info` with the GNU extension.
-    if format == PackageFormat::GnuExtension {
-        let debug_types_name = gimli::SectionId::DebugTypes.dwo_name().unwrap();
-        if let Some(debug_types_section) = dwo_obj.section_by_name(debug_types_name) {
-            let mut iter = dwo_dwarf.type_units();
-            while let Some(header) = iter.next()? {
-                let unit = dwo_dwarf.unit(header)?;
-                append_unit(
-                    format,
-                    &dwo,
-                    &debug_types_section,
-                    &unit,
-                    output,
-                    |_, _| { /* no-op, no compilation units in `.debug_types` */ },
-                    |type_signature, debug_info_or_types| {
-                        tu_index_entries.push(TuIndexEntry {
-                            type_signature,
-                            debug_info_or_types,
-                            debug_abbrev,
-                            debug_line,
-                            debug_str_offsets,
-                        });
-                    },
-                )?;
-            }
-        }
-    }
-
-    Ok(())
 }
 
 /// Returns the next number after `val` which is a power of 2.
@@ -1157,7 +1324,7 @@ fn next_pow2(mut val: u32) -> u32 {
 
 /// Returns a hash table computed for `elements`. Used in the `.debug_{cu,tu}_index` sections.
 #[tracing::instrument(level = "trace", skip_all)]
-fn bucket<B: Bucketable + fmt::Debug>(elements: &[B]) -> Vec<u32> {
+fn bucket<B: Bucketable>(elements: &[B]) -> Vec<u32> {
     let unit_count: u32 = elements.len().try_into().expect("unit count too big for u32");
     let num_buckets = if elements.len() < 2 { 2 } else { next_pow2(3 * unit_count / 2) };
     let mask: u64 = num_buckets as u64 - 1;
@@ -1181,86 +1348,6 @@ fn bucket<B: Bucketable + fmt::Debug>(elements: &[B]) -> Vec<u32> {
     buckets
 }
 
-/// Write `.debug_{cu,tu}_index` to the output object.
-fn write_index<'output, Endian, Entry>(
-    endianness: Endian,
-    format: PackageFormat,
-    entries: &[Entry],
-    output: &mut write::Object<'output>,
-    output_id: SectionId,
-) -> Result<()>
-where
-    Endian: gimli::Endianity,
-    Entry: IndexEntry + fmt::Debug,
-{
-    if entries.len() == 0 {
-        return Ok(());
-    }
-
-    let mut out = EndianVec::new(endianness);
-
-    let buckets = bucket(entries);
-    debug!(?buckets);
-
-    let num_columns = entries[0].number_of_columns(format);
-    assert!(entries.iter().all(|e| e.number_of_columns(format) == num_columns));
-    debug!(?num_columns);
-
-    // Write header..
-    match format {
-        PackageFormat::GnuExtension => {
-            // GNU Extension
-            out.write_u32(2)?;
-        }
-        PackageFormat::DwarfStd => {
-            // DWARF 5
-            out.write_u32(5)?;
-            // Reserved padding
-            out.write_u32(0)?;
-        }
-    }
-
-    // Columns (e.g. info, abbrev, loc, etc.)
-    out.write_u32(num_columns)?;
-    // Number of units
-    out.write_u32(entries.len().try_into().unwrap())?;
-    // Number of buckets
-    out.write_u32(buckets.len().try_into().unwrap())?;
-
-    // Write signatures..
-    for i in &buckets {
-        if *i > 0 {
-            out.write_u64(entries[(*i - 1) as usize].signature())?;
-        } else {
-            out.write_u64(0)?;
-        }
-    }
-
-    // Write indices..
-    for i in &buckets {
-        out.write_u32(*i)?;
-    }
-
-    // Write column headers..
-    entries[0].write_header(format, &mut out)?;
-
-    // Write offsets..
-    let write_offset = |contrib: Contribution| contrib.offset.0.try_into().unwrap();
-    for entry in entries {
-        entry.write_contribution(format, &mut out, write_offset)?;
-    }
-
-    // Write sizes..
-    let write_size = |contrib: Contribution| contrib.size.try_into().unwrap();
-    for entry in entries {
-        entry.write_contribution(format, &mut out, write_size)?;
-    }
-
-    // FIXME: use the correct alignment here
-    let _ = output.append_section_data(output_id, out.slice(), 1);
-    Ok(())
-}
-
 fn main() -> Result<()> {
     let subscriber = Registry::default().with(EnvFilter::from_env("RUST_DWP_LOG")).with(
         HierarchicalLayer::default()
@@ -1279,43 +1366,31 @@ fn main() -> Result<()> {
     let arena_relocations = Arena::new();
 
     let obj = load_object_file(&arena_mmap, &opt.executable)?;
-    let endianness = runtime_endian_of_object(&obj);
-    let (parent_debug_addr, dwarf_objects) =
-        parse_executable(&obj, &arena_data, &arena_relocations)?;
+    let (parent_debug_addr, dwarf_objects, version) =
+        parse_executable(&arena_data, &arena_relocations, &obj)?;
 
-    let format = PackageFormat::GnuExtension;
-    let mut output = create_output_object(format, obj.architecture(), obj.endianness())?;
-    let mut string_table = DwpStringTable::new(endianness);
+    let format = if version >= 5 {
+        PackageFormat::DwarfStd
+    } else {
+        PackageFormat::GnuExtension
+    };
 
-    let mut cu_index_entries = Vec::new();
-    let mut tu_index_entries = Vec::new();
+    let mut output = create_output_object(format, &obj)?;
 
     for dwo in dwarf_objects {
-        process_dwarf_object(
-            format,
-            parent_debug_addr.clone(),
-            dwo,
-            &mut cu_index_entries,
-            &mut tu_index_entries,
-            &mut string_table,
-            &mut output,
+        output.append_dwarf_object(
             &arena_data,
             &arena_mmap,
             &arena_relocations,
+            parent_debug_addr.clone(),
+            dwo,
         )?;
     }
-
-    // Write the merged string table to the `.debug_str.dwo` section.
-    let _ = string_table.write(&mut output);
-
-    // Write `.debug_cu_index` and `.debug_tu_index`
-    write_index(endianness, format, &cu_index_entries, &mut output.obj, output.debug_cu_index)?;
-    write_index(endianness, format, &tu_index_entries, &mut output.obj, output.debug_tu_index)?;
 
     let mut output_stream = StreamingBuffer::new(BufWriter::new(
         fs::File::create(opt.output).context(DwpError::FailedToCreateOutputFile)?,
     ));
-    output.obj.emit(&mut output_stream)?;
+    output.emit(&mut output_stream)?;
     output_stream.result()?;
     output_stream.into_inner().flush()?;
 
