@@ -386,6 +386,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                 UnitType::Compilation | UnitType::SplitCompilation(..),
                 Some(DwarfObjectIdentifier::Compilation(dwo_id)),
             ) => {
+                debug!(?dwo_id, "compilation unit");
                 if self.seen_units.contains(&DwarfObjectIdentifier::Compilation(dwo_id)) {
                     // Return early if a unit with this type signature has already been seen.
                     warn!("skipping {:?}, already seen", dwo_id);
@@ -411,13 +412,17 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                 UnitType::Compilation | UnitType::SplitType { .. },
                 Some(DwarfObjectIdentifier::Type(type_signature)),
             ) => {
+                debug!(?type_signature, "type unit");
                 if self.seen_units.contains(&DwarfObjectIdentifier::Type(type_signature)) {
                     // Return early if a unit with this type signature has already been seen.
                     warn!("skipping {:?}, already seen", type_signature);
                     return Ok(());
                 }
 
-                let offset = offset.as_debug_types_offset().unwrap().0;
+                let offset = match self.format {
+                    PackageFormat::GnuExtension => offset.as_debug_types_offset().unwrap().0,
+                    PackageFormat::DwarfStd => offset.as_debug_info_offset().unwrap().0,
+                };
                 let data = section
                     .data_range(offset.try_into().unwrap(), size)?
                     .ok_or(DwpError::CompilationUnitWithNoData)?;
