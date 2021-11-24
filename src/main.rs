@@ -409,7 +409,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                 Ok(())
             }
             (
-                UnitType::Compilation | UnitType::SplitType { .. },
+                UnitType::Type { .. } | UnitType::SplitType { .. },
                 Some(DwarfObjectIdentifier::Type(type_signature)),
             ) => {
                 debug!(?type_signature, "type unit");
@@ -1234,16 +1234,21 @@ fn dwo_identifier_of_unit<R: gimli::Reader>(
     unit: &gimli::Unit<R>,
 ) -> Option<DwarfObjectIdentifier> {
     match unit.header.type_() {
-        // DWARF 5
+        // Compilation units with DWARF 5
         UnitType::Skeleton(dwo_id) | UnitType::SplitCompilation(dwo_id) => {
             Some(DwarfObjectIdentifier::Compilation(dwo_id.into()))
         }
+        // Compilation units with GNU Extension
+        UnitType::Compilation => {
+            unit.dwo_id.map(|id| DwarfObjectIdentifier::Compilation(id.into()))
+        }
+        // Type units with DWARF 5
         UnitType::SplitType { type_signature, .. } => {
             Some(DwarfObjectIdentifier::Type(type_signature.into()))
         }
-        // GNU Extension (maybe!)
-        UnitType::Compilation => {
-            unit.dwo_id.map(|id| DwarfObjectIdentifier::Compilation(id.into()))
+        // Type units with GNU extension
+        UnitType::Type { type_signature, .. } => {
+            Some(DwarfObjectIdentifier::Type(type_signature.into()))
         }
         // Wrong compilation unit type.
         _ => None,
@@ -1323,7 +1328,14 @@ fn parse_executable<'input, 'arena: 'input>(
     while let Some(header) = iter.next()? {
         let unit = dwarf.unit(header)?;
         if let Some((target, path)) = dwo_id_and_path_of_unit(&dwarf, &unit)? {
-            target_dwarf_objects.insert(target);
+            // Only add `DwoId`s to the target vector, not `DebugTypeSignature`s. There doesn't
+            // appear to be a "skeleton type unit" to find the corresponding unit of (there are
+            // normal type units in an executable, but should we expect to find a corresponding
+            // split type unit for those?).
+            if matches!(target, DwarfObjectIdentifier::Compilation(_)) {
+                target_dwarf_objects.insert(target);
+            }
+
             dwarf_object_paths.push(path);
         }
     }
