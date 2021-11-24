@@ -107,6 +107,7 @@ macro_rules! define_section_markers {
 
 define_section_markers!(DebugInfo, DebugAbbrev, DebugStr, DebugTypes, DebugLine, DebugLoc);
 define_section_markers!(DebugLocLists, DebugRngLists, DebugStrOffsets, DebugMacinfo, DebugMacro);
+define_section_markers!(DebugCuIndex, DebugTuIndex);
 
 /// Wrapper around `Option<SectionId>` for creating the `SectionId` on first access (if it does
 /// not exist).
@@ -149,10 +150,10 @@ struct OutputPackage<'file, Endian: gimli::Endianity> {
 
     /// Identifier for the `.debug_cu_index.dwo` section in the object file being created. Format
     /// depends on whether this is a GNU extension-flavoured package or DWARF 5-flavoured package.
-    debug_cu_index: SectionId,
+    debug_cu_index: LazySectionId<DebugCuIndex>,
     /// Identifier for the `.debug_tu_index.dwo` section in the object file being created. Format
     /// depends on whether this is a GNU extension-flavoured package or DWARF 5-flavoured package.
-    debug_tu_index: SectionId,
+    debug_tu_index: LazySectionId<DebugTuIndex>,
 
     /// Identifier for the `.debug_info.dwo` section in the object file being created.
     ///
@@ -234,8 +235,8 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
     fn section(&mut self, id: gimli::SectionId) -> SectionId {
         use gimli::SectionId::*;
         match id {
-            DebugCuIndex => self.debug_cu_index,
-            DebugTuIndex => self.debug_tu_index,
+            DebugCuIndex => self.debug_cu_index.get(&mut self.obj),
+            DebugTuIndex => self.debug_tu_index.get(&mut self.obj),
             DebugInfo => self.debug_info.get(&mut self.obj),
             DebugAbbrev => self.debug_abbrev.get(&mut self.obj),
             DebugStr => self.debug_str.get(&mut self.obj),
@@ -568,17 +569,19 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
         let _ = self.string_table.write(&mut self.debug_str, &mut self.obj);
 
         // Write `.debug_{cu,tu}_index` sections to the object.
+        debug!("writing cu index");
         self.cu_index_entries.write_index(
             self.endian,
             self.format,
             &mut self.obj,
-            self.debug_cu_index,
+            &mut self.debug_cu_index,
         )?;
+        debug!("writing tu index");
         self.tu_index_entries.write_index(
             self.endian,
             self.format,
             &mut self.obj,
-            self.debug_tu_index,
+            &mut self.debug_tu_index,
         )?;
 
         // Write the contents of the entire object to the buffer.
@@ -989,27 +992,30 @@ impl IndexEntry for CuIndexEntry {
 
 trait IndexCollection<Entry: IndexEntry> {
     /// Write `.debug_{cu,tu}_index` to the output object.
-    fn write_index<'output, Endian>(
+    fn write_index<'output, Endian, Id>(
         &self,
         endianness: Endian,
         format: PackageFormat,
         output: &mut write::Object<'output>,
-        output_id: SectionId,
-    ) -> Result<()>
-    where
-        Endian: gimli::Endianity;
-}
-
-impl<Entry: IndexEntry> IndexCollection<Entry> for Vec<Entry> {
-    fn write_index<'output, Endian>(
-        &self,
-        endianness: Endian,
-        format: PackageFormat,
-        output: &mut write::Object<'output>,
-        output_id: SectionId,
+        output_id: &mut LazySectionId<Id>,
     ) -> Result<()>
     where
         Endian: gimli::Endianity,
+        Id: HasGimliId;
+}
+
+impl<Entry: IndexEntry + fmt::Debug> IndexCollection<Entry> for Vec<Entry> {
+    #[tracing::instrument(level = "trace", skip(output, output_id))]
+    fn write_index<'output, Endian, Id>(
+        &self,
+        endianness: Endian,
+        format: PackageFormat,
+        output: &mut write::Object<'output>,
+        output_id: &mut LazySectionId<Id>,
+    ) -> Result<()>
+    where
+        Endian: gimli::Endianity,
+        Id: HasGimliId,
     {
         if self.len() == 0 {
             return Ok(());
@@ -1075,6 +1081,7 @@ impl<Entry: IndexEntry> IndexCollection<Entry> for Vec<Entry> {
         }
 
         // FIXME: use the correct alignment here
+        let output_id = output_id.get(output);
         let _ = output.append_section_data(output_id, out.slice(), 1);
         Ok(())
     }
@@ -1326,28 +1333,18 @@ fn create_output_object<'input, 'output>(
     architecture: object::Architecture,
     endianness: object::Endianness,
 ) -> Result<OutputPackage<'output, RunTimeEndian>> {
-    use gimli::SectionId::*;
-
-    let mut obj = write::Object::new(BinaryFormat::Elf, architecture, endianness);
-
-    let mut add_section = |gimli_id: gimli::SectionId| -> SectionId {
-        obj.add_section(Vec::new(), dwo_name(gimli_id).as_bytes().to_vec(), SectionKind::Debug)
-    };
+    let obj = write::Object::new(BinaryFormat::Elf, architecture, endianness);
 
     let endian = runtime_endian_from_endianness(endianness);
-
-    let debug_cu_index = add_section(DebugCuIndex);
-    let debug_tu_index = add_section(DebugTuIndex);
-
     let string_table = DwpStringTable::new(endian);
 
     Ok(OutputPackage {
         obj,
         format,
         endian,
-        debug_cu_index,
-        debug_tu_index,
         string_table,
+        debug_cu_index: Default::default(),
+        debug_tu_index: Default::default(),
         debug_info: Default::default(),
         debug_abbrev: Default::default(),
         debug_str: Default::default(),
