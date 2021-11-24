@@ -2,8 +2,8 @@ use crate::relocate::{add_relocations, Relocate, RelocationMap};
 use anyhow::{anyhow, Context, Result};
 use gimli::{
     write::{EndianVec, Writer},
-    DebugAddr, DebugStrOffset, DebugStrOffsetsBase, DebugStrOffsetsIndex, DwarfFileType,
-    EndianSlice, Format, Reader, RunTimeEndian, UnitType,
+    DebugStrOffset, DebugStrOffsetsBase, DebugStrOffsetsIndex, DwarfFileType, EndianSlice, Format,
+    Reader, RunTimeEndian, UnitType,
 };
 use indexmap::IndexSet;
 use memmap2::Mmap;
@@ -19,7 +19,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use structopt::StructOpt;
 use thiserror::Error;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
 use tracing_tree::HierarchicalLayer;
 use typed_arena::Arena;
@@ -56,6 +56,8 @@ enum DwpError {
     CompilationUnitWithNoData,
     #[error("no data when reading header of DWARF 5 `.debug_str_offsets.dwo`")]
     Dwarf5StrOffsetWithoutHeader,
+    #[error("unit(s) {0:?} was referenced by executable but not found")]
+    MissingReferencedUnit(Vec<DwarfObjectIdentifier>),
 }
 
 /// DWARF packages come in pre-standard GNU extension format or DWARF 5 standardized format.
@@ -212,9 +214,13 @@ struct OutputPackage<'file, Endian: gimli::Endianity> {
     /// `.debug_str_offsets.dwo` for each DWARF object.
     string_table: DwpStringTable<Endian>,
 
-    /// `DebugTypeSignature`s of type units that have already been added to the output package,
-    /// checked before adding new TU index entries to de-duplicate type units.
-    seen_type_units: HashSet<DebugTypeSignature>,
+    /// `DebugTypeSignature`s of type units and `DwoId`s of compilation units that have already
+    /// been added to the output package.
+    ///
+    /// Used when adding new TU index entries to de-duplicate type units (as required by the
+    /// specification). Also used to check that all dwarf objects referenced by executables
+    /// have been found.
+    seen_units: HashSet<DwarfObjectIdentifier>,
 }
 
 impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
@@ -358,7 +364,6 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
     )]
     fn append_unit<'input, 'arena, 'output: 'arena, CuOp, Sect, TuOp>(
         &mut self,
-        dwo: &TargetDwarfObject,
         section: &Sect,
         unit: &gimli::Unit<DwpReader<'arena>>,
         mut append_cu_contribution: CuOp,
@@ -373,12 +378,17 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
         let offset = unit.header.offset();
 
         let identifier = dwo_identifier_of_unit(&unit);
-        match (unit.header.type_(), identifier, dwo.identifier) {
+        match (unit.header.type_(), identifier) {
             (
                 UnitType::Compilation | UnitType::SplitCompilation(..),
                 Some(DwarfObjectIdentifier::Compilation(dwo_id)),
-                DwarfObjectIdentifier::Compilation(target_dwo_id),
-            ) if dwo_id == target_dwo_id => {
+            ) => {
+                if self.seen_units.contains(&DwarfObjectIdentifier::Compilation(dwo_id)) {
+                    // Return early if a unit with this type signature has already been seen.
+                    warn!("skipping {:?}, already seen", dwo_id);
+                    return Ok(());
+                }
+
                 let offset = offset.as_debug_info_offset().unwrap().0;
                 let data = section
                     .data_range(offset.try_into().unwrap(), size)?
@@ -389,16 +399,18 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                     let offset = self.obj.append_section_data(id, data, section.align());
                     let contribution = Contribution { offset: ContributionOffset(offset), size };
                     append_cu_contribution(self, dwo_id, contribution);
+                    self.seen_units.insert(DwarfObjectIdentifier::Compilation(dwo_id));
                 }
+
                 Ok(())
             }
             (
                 UnitType::Compilation | UnitType::SplitType { .. },
                 Some(DwarfObjectIdentifier::Type(type_signature)),
-                DwarfObjectIdentifier::Type(target_type_signature),
-            ) if type_signature == target_type_signature => {
-                if self.seen_type_units.contains(&type_signature) {
+            ) => {
+                if self.seen_units.contains(&DwarfObjectIdentifier::Type(type_signature)) {
                     // Return early if a unit with this type signature has already been seen.
+                    warn!("skipping {:?}, already seen", type_signature);
                     return Ok(());
                 }
 
@@ -415,35 +427,40 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                     let offset = self.obj.append_section_data(id, data, section.align());
                     let contribution = Contribution { offset: ContributionOffset(offset), size };
                     append_tu_contribution(self, type_signature, contribution);
-                    self.seen_type_units.insert(type_signature);
+                    self.seen_units.insert(DwarfObjectIdentifier::Type(type_signature));
                 }
 
                 Ok(())
             }
-            (_, Some(..), _) => {
+            (_, Some(..)) => {
                 Err(anyhow!(DwpError::DwarfObjectCompilationUnitWithDwoIdNotSplitUnit))
             }
-            (_, None, _) => Ok(()),
+            (_, None) => Ok(()),
         }
     }
 
     /// Process a DWARF object. Copies relevant sections, compilation/type units and strings from DWARF
     /// object into output object.
-    #[tracing::instrument(
-        level = "trace",
-        skip(parent_debug_addr, arena_data, arena_mmap, arena_relocations)
-    )]
+    #[tracing::instrument(level = "trace", skip(arena_data, arena_mmap, arena_relocations))]
     fn append_dwarf_object<'input, 'output, 'arena: 'input>(
         &mut self,
         arena_data: &'arena Arena<Cow<'input, [u8]>>,
         arena_mmap: &'arena Arena<Mmap>,
         arena_relocations: &'arena Arena<RelocationMap>,
-        parent_debug_addr: DebugAddr<DwpReader<'arena>>,
-        dwo: TargetDwarfObject,
+        path: PathBuf,
     ) -> Result<()> {
         use gimli::SectionId::*;
 
-        let dwo_obj = load_object_file(&arena_mmap, &dwo.path)?;
+        let dwo_obj = match load_object_file(&arena_mmap, &path) {
+            Ok(dwo_obj) => dwo_obj,
+            Err(e) => {
+                warn!(
+                    "could not open object file, dwp may fail later if required unit is not found"
+                );
+                trace!(?e);
+                return Ok(());
+            }
+        };
 
         // Concatenate contents of sections from the DWARF object into the corresponding section in
         // the output.
@@ -472,8 +489,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
             load_file_section(id, &dwo_obj, true, &arena_data, &arena_relocations)
         };
 
-        let mut dwo_dwarf = gimli::Dwarf::load(&mut load_dwo_section)?;
-        dwo_dwarf.debug_addr = parent_debug_addr;
+        let dwo_dwarf = gimli::Dwarf::load(&mut load_dwo_section)?;
 
         // Concatenate string offsets from the DWARF object into the `.debug_str_offsets` section in
         // the output, rewriting offsets to be based on the new, merged string table.
@@ -489,7 +505,6 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
         while let Some(header) = iter.next()? {
             let unit = dwo_dwarf.unit(header)?;
             self.append_unit(
-                &dwo,
                 &debug_info_section,
                 &unit,
                 |this, dwo_id, debug_info| {
@@ -526,7 +541,6 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                 while let Some(header) = iter.next()? {
                     let unit = dwo_dwarf.unit(header)?;
                     self.append_unit(
-                        &dwo,
                         &debug_types_section,
                         &unit,
                         |_, _, _| { /* no-op, no compilation units in `.debug_types` */ },
@@ -617,31 +631,6 @@ enum DwarfObjectIdentifier {
     Compilation(DwoId),
     /// `DebugTypeSignature` identifying type units.
     Type(DebugTypeSignature),
-}
-
-/// A DWARF object referenced by input object.
-struct TargetDwarfObject {
-    /// `DwoId` or `DebugTypeSignature` of the DWARF object, read from compilation unit header (or
-    /// `DW_AT_GNU_dwo_id`).
-    identifier: DwarfObjectIdentifier,
-    /// Path to the DWARF object, read from `DW_AT_dwo_name`/`DW_AT_GNU_dwo_name`, prepended with
-    /// `DW_AT_comp_dir`.
-    path: PathBuf,
-}
-
-impl fmt::Debug for TargetDwarfObject {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{:?} ({})",
-            self.identifier,
-            self.path
-                .file_name()
-                .expect("target dwarf object path w/out filename")
-                .to_str()
-                .expect("target dwarf object filename has invalid unicode")
-        )
-    }
 }
 
 /// New-type'd index from `IndexVec` of strings inserted into the `.debug_str` section.
@@ -1092,9 +1081,12 @@ impl<Entry: IndexEntry> IndexCollection<Entry> for Vec<Entry> {
 #[derive(Debug, StructOpt)]
 #[structopt(name = "rust-dwp", about = "merge split dwarf (.dwo) files")]
 struct Opt {
+    /// Specify path to input dwarf objects and packages
+    #[structopt(parse(from_os_str))]
+    inputs: Vec<PathBuf>,
     /// Specify the executable/library files to get the list of *.dwo from
     #[structopt(short = "e", long = "exec", parse(from_os_str))]
-    executable: PathBuf,
+    executables: Option<Vec<PathBuf>>,
     /// Specify the path to write the packaged dwp file to
     #[structopt(short = "o", long = "output", parse(from_os_str))]
     output: PathBuf,
@@ -1210,7 +1202,7 @@ fn dwo_identifier_of_unit<R: gimli::Reader>(
 fn dwo_id_and_path_of_unit<R: gimli::Reader>(
     dwarf: &gimli::Dwarf<R>,
     unit: &gimli::Unit<R>,
-) -> Result<Option<TargetDwarfObject>> {
+) -> Result<Option<(DwarfObjectIdentifier, PathBuf)>> {
     let identifier = if let Some(identifier) = dwo_identifier_of_unit(unit) {
         identifier
     } else {
@@ -1243,7 +1235,7 @@ fn dwo_id_and_path_of_unit<R: gimli::Reader>(
     };
     path.push(dwo_name);
 
-    Ok(Some(TargetDwarfObject { identifier, path }))
+    Ok(Some((identifier, path)))
 }
 
 /// Parse the executable and return the `.debug_addr` section and the referenced DWARF objects.
@@ -1256,9 +1248,9 @@ fn parse_executable<'input, 'arena: 'input>(
     arena_data: &'arena Arena<Cow<'input, [u8]>>,
     arena_relocations: &'arena Arena<RelocationMap>,
     obj: &object::File<'input>,
-) -> Result<(DebugAddr<DwpReader<'arena>>, Vec<TargetDwarfObject>, u16)> {
-    let mut dwarf_objects = Vec::new();
-
+    target_dwarf_objects: &mut HashSet<DwarfObjectIdentifier>,
+    dwarf_object_paths: &mut Vec<PathBuf>,
+) -> Result<(u16, object::Architecture, object::Endianness)> {
     let mut load_section = |id: gimli::SectionId| -> Result<_> {
         load_file_section(id, &obj, false, &arena_data, &arena_relocations)
     };
@@ -1273,33 +1265,31 @@ fn parse_executable<'input, 'arena: 'input>(
     let mut iter = dwarf.units();
     while let Some(header) = iter.next()? {
         let unit = dwarf.unit(header)?;
-        if let Some(dwo) = dwo_id_and_path_of_unit(&dwarf, &unit)? {
-            dwarf_objects.push(dwo);
+        if let Some((target, path)) = dwo_id_and_path_of_unit(&dwarf, &unit)? {
+            target_dwarf_objects.insert(target);
+            dwarf_object_paths.push(path);
         }
     }
 
-    Ok((dwarf.debug_addr, dwarf_objects, version))
+    Ok((version, obj.architecture(), obj.endianness()))
 }
 
 /// Create an object file with empty sections that will be later populated from DWARF object files.
-#[tracing::instrument(level = "trace", skip(input_executable))]
+#[tracing::instrument(level = "trace")]
 fn create_output_object<'input, 'output>(
     format: PackageFormat,
-    input_executable: &object::File<'input>,
+    architecture: object::Architecture,
+    endianness: object::Endianness,
 ) -> Result<OutputPackage<'output, RunTimeEndian>> {
     use gimli::SectionId::*;
 
-    let mut obj = write::Object::new(
-        BinaryFormat::Elf,
-        input_executable.architecture(),
-        input_executable.endianness(),
-    );
+    let mut obj = write::Object::new(BinaryFormat::Elf, architecture, endianness);
 
     let mut add_section = |gimli_id: gimli::SectionId| -> SectionId {
         obj.add_section(Vec::new(), dwo_name(gimli_id).as_bytes().to_vec(), SectionKind::Debug)
     };
 
-    let endian = runtime_endian_from_endianness(input_executable.endianness());
+    let endian = runtime_endian_from_endianness(endianness);
 
     let debug_cu_index = add_section(DebugCuIndex);
     let debug_tu_index = add_section(DebugTuIndex);
@@ -1326,7 +1316,7 @@ fn create_output_object<'input, 'output>(
         debug_macro: Default::default(),
         cu_index_entries: Default::default(),
         tu_index_entries: Default::default(),
-        seen_type_units: Default::default(),
+        seen_units: Default::default(),
     })
 }
 
@@ -1389,22 +1379,50 @@ fn main() -> Result<()> {
     let arena_mmap = Arena::new();
     let arena_relocations = Arena::new();
 
-    let obj = load_object_file(&arena_mmap, &opt.executable)?;
-    let (parent_debug_addr, dwarf_objects, version) =
-        parse_executable(&arena_data, &arena_relocations, &obj)?;
+    let mut version = None;
+    let mut architecture = None;
+    let mut endianness = None;
 
-    let format = if version >= 5 { PackageFormat::DwarfStd } else { PackageFormat::GnuExtension };
+    // Paths to DWARF objects to open (from positional arguments or referenced by executables).
+    let mut dwarf_object_paths = opt.inputs;
+    // `DwoId`s or `DebugTypeSignature`s referenced by any executables that have been opened,
+    // must find.
+    let mut target_dwarf_objects = HashSet::new();
 
-    let mut output = create_output_object(format, &obj)?;
+    if let Some(executables) = opt.executables {
+        for executable in &executables {
+            let obj = load_object_file(&arena_mmap, executable)?;
+            let (found_version, found_architecture, found_endianness) = parse_executable(
+                &arena_data,
+                &arena_relocations,
+                &obj,
+                &mut target_dwarf_objects,
+                &mut dwarf_object_paths,
+            )?;
 
-    for dwo in dwarf_objects {
-        output.append_dwarf_object(
-            &arena_data,
-            &arena_mmap,
-            &arena_relocations,
-            parent_debug_addr.clone(),
-            dwo,
-        )?;
+            version = version.or(Some(found_version));
+            architecture = architecture.or(Some(found_architecture));
+            endianness = endianness.or(Some(found_endianness));
+        }
+    }
+
+    let format = if matches!(version, Some(version) if version >= 5) {
+        PackageFormat::DwarfStd
+    } else {
+        PackageFormat::GnuExtension
+    };
+    let architecture = architecture.unwrap_or(object::Architecture::X86_64);
+    let endianness = endianness.unwrap_or(object::Endianness::Little);
+
+    let mut output = create_output_object(format, architecture, endianness)?;
+
+    for path in dwarf_object_paths {
+        output.append_dwarf_object(&arena_data, &arena_mmap, &arena_relocations, path)?;
+    }
+
+    if target_dwarf_objects.difference(&output.seen_units).count() != 0 {
+        let missing = target_dwarf_objects.difference(&output.seen_units).cloned().collect();
+        return Err(anyhow!(DwpError::MissingReferencedUnit(missing)));
     }
 
     let mut output_stream = StreamingBuffer::new(BufWriter::new(
