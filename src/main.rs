@@ -1397,25 +1397,29 @@ fn next_pow2(mut val: u32) -> u32 {
 
 /// Returns a hash table computed for `elements`. Used in the `.debug_{cu,tu}_index` sections.
 #[tracing::instrument(level = "trace", skip_all)]
-fn bucket<B: Bucketable>(elements: &[B]) -> Vec<u32> {
+fn bucket<B: Bucketable + fmt::Debug>(elements: &[B]) -> Vec<u32> {
     let unit_count: u32 = elements.len().try_into().expect("unit count too big for u32");
     let num_buckets = if elements.len() < 2 { 2 } else { next_pow2(3 * unit_count / 2) };
     let mask: u64 = num_buckets as u64 - 1;
+    trace!(?mask);
 
     let mut buckets = vec![0u32; num_buckets as usize];
-    let mut i = 0;
-    for elem in elements {
+    trace!(?buckets);
+    for (elem, i) in elements.iter().zip(0u32..) {
+        trace!(?i, ?elem);
         let s = elem.index();
         let mut h = s & mask;
         let hp = ((s >> 32) & mask) | 1;
+        trace!(?s, ?h, ?hp);
 
         while buckets[h as usize] > 0 {
-            assert!(elements[(buckets[h as usize] - 1) as usize].index() == elem.index());
+            assert!(elements[(buckets[h as usize] - 1) as usize].index() != elem.index());
             h = (h + hp) & mask;
+            trace!(?h);
         }
 
         buckets[h as usize] = i + 1;
-        i += 1;
+        trace!(?buckets);
     }
 
     buckets
