@@ -1043,9 +1043,9 @@ impl<Entry: IndexEntry + fmt::Debug> IndexCollection<Entry> for Vec<Entry> {
             }
             PackageFormat::DwarfStd => {
                 // DWARF 5
-                out.write_u32(5)?;
+                out.write_u16(5)?;
                 // Reserved padding
-                out.write_u32(0)?;
+                out.write_u16(0)?;
             }
         }
 
