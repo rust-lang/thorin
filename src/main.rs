@@ -13,9 +13,11 @@ use object::{
 };
 use std::borrow::{Borrow, Cow};
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fmt;
-use std::fs;
-use std::io::{self, BufWriter, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufWriter, Stdout, Write};
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use structopt::StructOpt;
 use thiserror::Error;
@@ -1088,8 +1090,51 @@ struct Opt {
     #[structopt(short = "e", long = "exec", parse(from_os_str))]
     executables: Option<Vec<PathBuf>>,
     /// Specify the path to write the packaged dwp file to
-    #[structopt(short = "o", long = "output", parse(from_os_str))]
+    #[structopt(short = "o", long = "output", parse(from_os_str), default_value = "-")]
     output: PathBuf,
+}
+
+/// Wrapper around output writer which handles differences between stdout, file and pipe outputs.
+enum Output {
+    Stdout(Stdout),
+    File(File),
+    Pipe(File),
+}
+
+impl Output {
+    /// Create a `Output` from the input path (or "-" for stdout).
+    fn new<S: AsRef<OsStr>>(path: S) -> Result<Self> {
+        let path = path.as_ref();
+        if path == "-" {
+            return Ok(Output::Stdout(io::stdout()));
+        }
+
+        let file =
+            OpenOptions::new().read(true).write(true).create(true).truncate(true).open(path)?;
+        if file.metadata()?.file_type().is_fifo() {
+            Ok(Output::File(file))
+        } else {
+            Ok(Output::Pipe(file))
+        }
+    }
+}
+
+impl Write for Output {
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Output::Stdout(stdout) => stdout.flush(),
+            Output::Pipe(pipe) => pipe.flush(),
+            Output::File(file) => file.flush(),
+        }
+    }
+
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Output::Stdout(stdout) => stdout.write(buf),
+            Output::Pipe(pipe) => pipe.write(buf),
+            Output::File(file) => file.write(buf),
+        }
+    }
 }
 
 /// Helper function to return the name of a section in a dwarf object.
@@ -1426,7 +1471,7 @@ fn main() -> Result<()> {
     }
 
     let mut output_stream = StreamingBuffer::new(BufWriter::new(
-        fs::File::create(opt.output).context(DwpError::FailedToCreateOutputFile)?,
+        Output::new(opt.output).context(DwpError::FailedToCreateOutputFile)?,
     ));
     output.emit(&mut output_stream)?;
     output_stream.result()?;
