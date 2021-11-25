@@ -1379,27 +1379,11 @@ fn create_output_object<'input, 'output>(
     })
 }
 
-/// Returns the next number after `val` which is a power of 2.
-///
-/// Invariant: `val >= 2`
-#[tracing::instrument(level = "trace")]
-fn next_pow2(mut val: u32) -> u32 {
-    assert!(val >= 2);
-    val -= 1;
-    val |= val >> 1;
-    val |= val >> 2;
-    val |= val >> 4;
-    val |= val >> 8;
-    val |= val >> 16;
-    val += 1;
-    val
-}
-
 /// Returns a hash table computed for `elements`. Used in the `.debug_{cu,tu}_index` sections.
 #[tracing::instrument(level = "trace", skip_all)]
 fn bucket<B: Bucketable + fmt::Debug>(elements: &[B]) -> Vec<u32> {
     let unit_count: u32 = elements.len().try_into().expect("unit count too big for u32");
-    let num_buckets = if elements.len() < 2 { 2 } else { next_pow2(3 * unit_count / 2) };
+    let num_buckets = if elements.len() < 2 { 2 } else { (3 * unit_count / 2).next_power_of_two() };
     let mask: u64 = num_buckets as u64 - 1;
     trace!(?mask);
 
@@ -1518,22 +1502,4 @@ fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::next_pow2;
-
-    #[test]
-    fn test_next_pow2() {
-        assert_eq!(next_pow2(2), 2);
-        assert_eq!(next_pow2(3), 4);
-        assert_eq!(next_pow2(5), 8);
-        assert_eq!(next_pow2(8), 8);
-        assert_eq!(next_pow2(13), 16);
-        assert_eq!(next_pow2(16), 16);
-        assert_eq!(next_pow2(22), 32);
-        assert_eq!(next_pow2(30), 32);
-        assert_eq!(next_pow2(32), 32);
-    }
 }
