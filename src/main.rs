@@ -3,7 +3,7 @@ use anyhow::{anyhow, Context, Result};
 use gimli::{
     write::{EndianVec, Writer},
     DebugStrOffset, DebugStrOffsetsBase, DebugStrOffsetsIndex, DwarfFileType, EndianSlice, Format,
-    Reader, RunTimeEndian, UnitType,
+    Reader, RunTimeEndian, UnitIndex, UnitType,
 };
 use indexmap::IndexSet;
 use memmap2::Mmap;
@@ -155,6 +155,120 @@ impl<Id: HasGimliId> LazySectionId<Id> {
     }
 }
 
+/// Helper trait that abstracts over `gimli::DebugCuIndex` and `gimli::DebugTuIndex`.
+trait IndexSection<'input, Endian: gimli::Endianity, R: gimli::Reader>: gimli::Section<R> {
+    fn new(section: &'input [u8], endian: Endian) -> Self;
+
+    fn index(self) -> gimli::read::Result<UnitIndex<R>>;
+}
+
+impl<'input, Endian: gimli::Endianity> IndexSection<'input, Endian, EndianSlice<'input, Endian>>
+    for gimli::DebugCuIndex<EndianSlice<'input, Endian>>
+{
+    fn new(section: &'input [u8], endian: Endian) -> Self {
+        Self::new(section, endian)
+    }
+
+    fn index(self) -> gimli::read::Result<UnitIndex<EndianSlice<'input, Endian>>> {
+        Self::index(self)
+    }
+}
+
+impl<'input, Endian: gimli::Endianity> IndexSection<'input, Endian, EndianSlice<'input, Endian>>
+    for gimli::DebugTuIndex<EndianSlice<'input, Endian>>
+{
+    fn new(section: &'input [u8], endian: Endian) -> Self {
+        Self::new(section, endian)
+    }
+
+    fn index(self) -> gimli::read::Result<UnitIndex<EndianSlice<'input, Endian>>> {
+        Self::index(self)
+    }
+}
+
+/// Returns the parsed unit index from a `.debug_{cu,tu}_index` section.
+fn maybe_load_index_section<'input, Endian, Index, R>(
+    endian: Endian,
+    input: &object::File<'input>,
+) -> Result<Option<UnitIndex<R>>>
+where
+    Endian: gimli::Endianity,
+    Index: IndexSection<'input, Endian, R>,
+    R: gimli::Reader,
+{
+    let index_name = Index::id().dwo_name().unwrap();
+    if let Some(index_section) = input.section_by_name(index_name) {
+        let index_data = index_section.data()?;
+        let unit_index = Index::new(index_data, endian).index()?;
+        Ok(Some(unit_index))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Returns a closure which takes an identifier and a `Option<Contribution>`, and returns an
+/// adjusted contribution if the input file is a DWARF package (and the contribution was
+/// present).
+///
+/// For example, consider the `.debug_str_offsets` section: DWARF packages have a single
+/// `.debug_str_offsets` section which contains the string offsets of all of its compilation/type
+/// units, the contributions of each unit into that section are tracked in its
+/// `.debug_{cu,tu}_index` section.
+///
+/// When a DWARF package is the input, the contributions of the units which constituted that
+/// package should not be lost when its `.debug_str_offsets` section is merged with the new
+/// DWARF package currently being created.
+///
+/// Given a parsed index section, use the size of its contribution to `.debug_str_offsets` as the
+/// size of its contribution in the new unit (without this, it would be the size of the entire
+/// `.debug_str_offsets` section from the input, rather than the part that the compilation unit
+/// originally contributed to that). For subsequent units from the input, the offset in the
+/// contribution will need to be adjusted to based on the size of the previous units.
+///
+/// This function returns a "contribution adjustor" closure, which adjusts the contribution's
+/// offset and size according to its contribution in the input's index and with an offset
+/// accumulated over all calls to the closure.
+fn create_contribution_adjustor<'input, Identifier, Target, R: 'input>(
+    index: Option<&'input UnitIndex<R>>,
+) -> Result<Box<dyn FnMut(Identifier, Option<Contribution>) -> Result<Option<Contribution>> + 'input>>
+where
+    Identifier: Bucketable,
+    Target: HasGimliId,
+    R: gimli::Reader,
+{
+    let mut adjustment = 0;
+
+    Ok(Box::new(
+        move |identifier: Identifier,
+              contribution: Option<Contribution>|
+              -> Result<Option<Contribution>> {
+            match (&index, contribution) {
+                // dwp input with section
+                (Some(index), Some(contribution)) => {
+                    let row_id = index.find(identifier.index()).expect("dwp unit not in index");
+                    let str_offset_section = index
+                        .sections(row_id)?
+                        .find(|index_section| index_section.section == Target::gimli_id())
+                        .unwrap();
+                    let adjusted_offset: u64 = contribution.offset.0 + adjustment;
+                    adjustment += str_offset_section.size as u64;
+
+                    Ok(Some(Contribution {
+                        offset: ContributionOffset(adjusted_offset),
+                        size: str_offset_section.size as u64,
+                    }))
+                }
+                // dwp input without section
+                (Some(_), None) => Ok(None),
+                // dwo input with section
+                (None, Some(contribution)) => Ok(Some(contribution)),
+                // dwo input without section
+                (None, None) => Ok(None),
+            }
+        },
+    ))
+}
+
 /// In-progress DWARF package being produced.
 struct OutputPackage<'file, Endian: gimli::Endianity> {
     /// Object file being created.
@@ -163,7 +277,7 @@ struct OutputPackage<'file, Endian: gimli::Endianity> {
     /// Format of the DWARF package being created.
     format: PackageFormat,
     /// Endianness of the DWARF package being created.
-    endian: gimli::RunTimeEndian,
+    endian: Endian,
 
     /// Identifier for the `.debug_cu_index.dwo` section in the object file being created. Format
     /// depends on whether this is a GNU extension-flavoured package or DWARF 5-flavoured package.
@@ -391,8 +505,8 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
         mut append_tu_contribution: TuOp,
     ) -> Result<()>
     where
-        CuOp: FnMut(&mut Self, DwoId, Contribution),
-        TuOp: FnMut(&mut Self, DebugTypeSignature, Contribution),
+        CuOp: FnMut(&mut Self, DwoId, Contribution) -> Result<()>,
+        TuOp: FnMut(&mut Self, DebugTypeSignature, Contribution) -> Result<()>,
         Sect: ObjectSection<'input>,
     {
         let size: u64 = unit.header.length_including_self().try_into().unwrap();
@@ -420,7 +534,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                     let id = self.debug_info.get(&mut self.obj);
                     let offset = self.obj.append_section_data(id, data, section.align());
                     let contribution = Contribution { offset: ContributionOffset(offset), size };
-                    append_cu_contribution(self, dwo_id, contribution);
+                    append_cu_contribution(self, dwo_id, contribution)?;
                     self.seen_units.insert(DwarfObjectIdentifier::Compilation(dwo_id));
                 }
 
@@ -452,7 +566,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                     };
                     let offset = self.obj.append_section_data(id, data, section.align());
                     let contribution = Contribution { offset: ContributionOffset(offset), size };
-                    append_tu_contribution(self, type_signature, contribution);
+                    append_tu_contribution(self, type_signature, contribution)?;
                     self.seen_units.insert(DwarfObjectIdentifier::Type(type_signature));
                 }
 
@@ -503,6 +617,38 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
         // in the output, rewriting offsets to be based on the new, merged string table.
         let debug_str_offsets = self.append_str_offsets(&input, &input_dwarf)?;
 
+        // Load index sections (if they exist).
+        let cu_index =
+            maybe_load_index_section::<_, gimli::DebugCuIndex<_>, _>(self.endian, input)?;
+        let tu_index =
+            maybe_load_index_section::<_, gimli::DebugTuIndex<_>, _>(self.endian, input)?;
+
+        // Create offset adjustor functions, see comment on `create_contribution_adjustor` for
+        // explanation.
+        let mut abbrev_cu_adjustor =
+            create_contribution_adjustor::<_, crate::DebugAbbrev, _>(cu_index.as_ref())?;
+        let mut line_cu_adjustor =
+            create_contribution_adjustor::<_, crate::DebugLine, _>(cu_index.as_ref())?;
+        let mut loc_cu_adjustor =
+            create_contribution_adjustor::<_, crate::DebugLoc, _>(cu_index.as_ref())?;
+        let mut loclists_cu_adjustor =
+            create_contribution_adjustor::<_, crate::DebugLocLists, _>(cu_index.as_ref())?;
+        let mut rnglists_cu_adjustor =
+            create_contribution_adjustor::<_, crate::DebugRngLists, _>(cu_index.as_ref())?;
+        let mut str_offsets_cu_adjustor =
+            create_contribution_adjustor::<_, crate::DebugStrOffsets, _>(cu_index.as_ref())?;
+        let mut macinfo_cu_adjustor =
+            create_contribution_adjustor::<_, crate::DebugMacinfo, _>(cu_index.as_ref())?;
+        let mut macro_cu_adjustor =
+            create_contribution_adjustor::<_, crate::DebugMacro, _>(cu_index.as_ref())?;
+
+        let mut abbrev_tu_adjustor =
+            create_contribution_adjustor::<_, crate::DebugAbbrev, _>(tu_index.as_ref())?;
+        let mut line_tu_adjustor =
+            create_contribution_adjustor::<_, crate::DebugLine, _>(tu_index.as_ref())?;
+        let mut str_offsets_tu_adjustor =
+            create_contribution_adjustor::<_, crate::DebugStrOffsets, _>(tu_index.as_ref())?;
+
         let debug_info_name = gimli::SectionId::DebugInfo.dwo_name().unwrap();
         let debug_info_section = input
             .section_by_name(debug_info_name)
@@ -516,6 +662,15 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                 &debug_info_section,
                 &unit,
                 |this, dwo_id, debug_info| {
+                    let debug_abbrev = abbrev_cu_adjustor(dwo_id, Some(debug_abbrev))?.unwrap();
+                    let debug_line = line_cu_adjustor(dwo_id, debug_line)?;
+                    let debug_loc = loc_cu_adjustor(dwo_id, debug_loc)?;
+                    let debug_loclists = loclists_cu_adjustor(dwo_id, debug_loclists)?;
+                    let debug_rnglists = rnglists_cu_adjustor(dwo_id, debug_rnglists)?;
+                    let debug_str_offsets = str_offsets_cu_adjustor(dwo_id, debug_str_offsets)?;
+                    let debug_macinfo = macinfo_cu_adjustor(dwo_id, debug_macinfo)?;
+                    let debug_macro = macro_cu_adjustor(dwo_id, debug_macro)?;
+
                     this.cu_index_entries.push(CuIndexEntry {
                         dwo_id,
                         debug_info,
@@ -528,15 +683,21 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                         debug_macinfo,
                         debug_macro,
                     });
+                    Ok(())
                 },
-                |this, type_signature, debug_info| {
+                |this, type_sig, debug_info| {
+                    let debug_abbrev = abbrev_tu_adjustor(type_sig, Some(debug_abbrev))?.unwrap();
+                    let debug_line = line_tu_adjustor(type_sig, debug_line)?;
+                    let debug_str_offsets = str_offsets_tu_adjustor(type_sig, debug_str_offsets)?;
+
                     this.tu_index_entries.push(TuIndexEntry {
-                        type_signature,
+                        type_signature: type_sig,
                         debug_info_or_types: debug_info,
                         debug_abbrev,
                         debug_line,
                         debug_str_offsets,
                     });
+                    Ok(())
                 },
             )?;
         }
@@ -551,15 +712,25 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                     self.append_unit(
                         &debug_types_section,
                         &unit,
-                        |_, _, _| { /* no-op, no compilation units in `.debug_types` */ },
-                        |this, type_signature, debug_info_or_types| {
+                        |_, _, _| {
+                            /* no-op, no compilation units in `.debug_types` */
+                            Ok(())
+                        },
+                        |this, type_sig, debug_info_or_types| {
+                            let debug_abbrev =
+                                abbrev_tu_adjustor(type_sig, Some(debug_abbrev))?.unwrap();
+                            let debug_line = line_tu_adjustor(type_sig, debug_line)?;
+                            let debug_str_offsets =
+                                str_offsets_tu_adjustor(type_sig, debug_str_offsets)?;
+
                             this.tu_index_entries.push(TuIndexEntry {
-                                type_signature,
+                                type_signature: type_sig,
                                 debug_info_or_types,
                                 debug_abbrev,
                                 debug_line,
                                 debug_str_offsets,
                             });
+                            Ok(())
                         },
                     )?;
                 }
@@ -605,6 +776,12 @@ impl<'file, Endian: gimli::Endianity> fmt::Debug for OutputPackage<'file, Endian
 #[derive(Copy, Clone, Eq, Hash, PartialEq)]
 struct DwoId(u64);
 
+impl Bucketable for DwoId {
+    fn index(&self) -> u64 {
+        self.0
+    }
+}
+
 impl fmt::Debug for DwoId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "DwoId({:#x})", self.0)
@@ -621,6 +798,12 @@ impl From<gimli::DwoId> for DwoId {
 /// implementation to print in hexadecimal.
 #[derive(Copy, Clone, Eq, Hash, PartialEq)]
 struct DebugTypeSignature(u64);
+
+impl Bucketable for DebugTypeSignature {
+    fn index(&self) -> u64 {
+        self.0
+    }
+}
 
 impl fmt::Debug for DebugTypeSignature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
