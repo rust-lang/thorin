@@ -6,8 +6,10 @@ use crate::DwpError;
 use anyhow::{anyhow, Context, Result};
 use gimli;
 use object::{Object, ObjectSection, ObjectSymbol, RelocationKind, RelocationTarget};
-use std::borrow::Cow;
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
+
+pub(crate) type DwpReader<'arena> =
+    Relocate<'arena, gimli::EndianSlice<'arena, gimli::RunTimeEndian>>;
 
 pub(crate) type RelocationMap = HashMap<usize, object::Relocation>;
 
