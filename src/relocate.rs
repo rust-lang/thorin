@@ -160,10 +160,7 @@ pub(crate) fn add_relocations(
                     }
                     Err(_) => {
                         return Err(anyhow!(DwpError::RelocationWithInvalidSymbol(
-                            section
-                                .name()
-                                .context(DwpError::SectionWithoutName(offset))?
-                                .to_string(),
+                            section.name().context(DwpError::NamelessSection(offset))?.to_string(),
                             offset,
                         )));
                     }
@@ -172,13 +169,13 @@ pub(crate) fn add_relocations(
 
             if relocations.insert(offset, relocation).is_some() {
                 return Err(anyhow!(DwpError::MultipleRelocations(
-                    section.name().context(DwpError::SectionWithoutName(offset))?.to_string(),
+                    section.name().context(DwpError::NamelessSection(offset))?.to_string(),
                     offset,
                 )));
             }
         } else {
             return Err(anyhow!(DwpError::UnsupportedRelocation(
-                section.name().context(DwpError::SectionWithoutName(offset))?.to_string(),
+                section.name().context(DwpError::NamelessSection(offset))?.to_string(),
                 offset,
             )));
         }
