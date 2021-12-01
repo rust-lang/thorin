@@ -9,8 +9,14 @@ pub(crate) enum DwpError {
     OpenObjectFile,
     #[error("Failed to mmap object file")]
     MmapObjectFile,
+    #[error("Failed to parse kind of input file")]
+    ParseFileKind,
     #[error("Failed to parse object file")]
     ParseObjectFile,
+    #[error("Failed to parse archive file")]
+    ParseArchiveFile,
+    #[error("Failed to parse archive member")]
+    ParseArchiveMember,
     #[error("Section without name at offset 0x{0:08x}")]
     NamelessSection(usize),
     #[error("Relocation with invalid symbol for section `{0}` at offset 0x{1:08x}")]

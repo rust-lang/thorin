@@ -367,18 +367,26 @@ pub(crate) fn dwo_id_and_path_of_unit<R: gimli::Reader>(
     Ok(Some((identifier, path)))
 }
 
+/// Helper function which opens a file for the given path and mmaps the input, returning a
+/// reference to the data in the arena.
+#[tracing::instrument(level = "trace", skip(arena_mmap))]
+pub(crate) fn open_and_mmap_input<'input, 'arena: 'input>(
+    arena_mmap: &'arena Arena<Mmap>,
+    path: &'input Path,
+) -> Result<&'arena [u8]> {
+    let file = File::open(&path).context(DwpError::OpenObjectFile)?;
+    let mmap = (unsafe { Mmap::map(&file) }).context(DwpError::MmapObjectFile)?;
+    Ok((*arena_mmap.alloc(mmap)).borrow().as_ref())
+}
+
 /// Load and parse an object file.
 #[tracing::instrument(level = "trace", skip(arena_mmap))]
 pub(crate) fn load_object_file<'input, 'arena: 'input>(
     arena_mmap: &'arena Arena<Mmap>,
     path: &'input Path,
 ) -> Result<object::File<'arena>> {
-    let file = File::open(&path).context(DwpError::OpenObjectFile)?;
-
-    let mmap = (unsafe { Mmap::map(&file) }).context(DwpError::MmapObjectFile)?;
-
-    let mmap_ref = (*arena_mmap.alloc(mmap)).borrow();
-    object::File::parse(&**mmap_ref).context(DwpError::ParseObjectFile)
+    let data = open_and_mmap_input(arena_mmap, path)?;
+    object::File::parse(data).context(DwpError::ParseObjectFile)
 }
 
 /// Loads a section of a file from `object::File` into a `gimli::EndianSlice`. Expected to be
