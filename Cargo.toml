@@ -1,5 +1,9 @@
 [package]
-name = "dwp"
+name = "rust-dwp"
+authors = [ "David Wood <david.wood@huawei.com>" ]
+description = "Merge dwarf objects into dwarf packages"
+license = "Apache-2.0/MIT"
+readme = "./README.md"
 version = "0.1.0"
 edition = "2021"
 

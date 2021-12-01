@@ -27,15 +27,15 @@ mod strings;
 mod util;
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "rust-dwp", about = "merge split dwarf (.dwo) files")]
+#[structopt(name = "rust-dwp", about = "merge dwarf objects into dwarf packages")]
 struct Opt {
     /// Specify path to input dwarf objects and packages
     #[structopt(parse(from_os_str))]
     inputs: Vec<PathBuf>,
-    /// Specify the executable/library files to get the list of *.dwo from
+    /// Specify path to executables to read list of dwarf objects from
     #[structopt(short = "e", long = "exec", parse(from_os_str))]
     executables: Option<Vec<PathBuf>>,
-    /// Specify the path to write the packaged dwp file to
+    /// Specify path to write the dwarf package to
     #[structopt(short = "o", long = "output", parse(from_os_str), default_value = "-")]
     output: PathBuf,
 }
