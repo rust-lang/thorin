@@ -1,18 +1,18 @@
-# `rust-dwp`
-`rust-dwp` is an DWARF packaging utility for creating DWARF packages (`*.dwp` files) out of input
+# `thorin`
+`thorin` is an DWARF packaging utility for creating DWARF packages (`*.dwp` files) out of input
 DWARF objects (`*.dwo` files; or `*.o` files with `.dwo` sections), supporting both the pre-standard
 GNU extension format for DWARF packages and the standardized format introduced in DWARF 5.
 
 ## Usage
-`rust-dwp` can read input DWARF objects from executables or can package arbitrary input dwarf
+`thorin` can read input DWARF objects from executables or can package arbitrary input dwarf
 objects (including DWARF objects in archive files, such as Rust rlibs)!
 
 ```
-rust-dwp 0.1.0
+thorin 0.1.0
 merge dwarf objects into dwarf packages
 
 USAGE:
-    rust-dwp [OPTIONS] [--] [inputs]...
+    thorin [OPTIONS] [--] [inputs]...
 
 FLAGS:
     -h, --help       Prints help information
@@ -29,15 +29,16 @@ ARGS:
 If the input objects are of DWARF version 5 or greater, then the output package will be in DWARF 5
 format. For version 4 and below, the GNU Extension format will be used for the output package.
 
-## Contributing to `rust-dwp`
+## Contributing to `thorin`
 If you want help or mentorship, reach out to us in a GitHub issue, or ask `davidtwco` on the
 [Rust Zulip instance](https://rust-lang.zulipchat.com/).
 
-`rust-dwp` should always build on stable `rustc`. To build `rust-dwp`:
+`thorin` should always build on stable `rustc`. To build `thorin`:
 
 ```shell-session
 $ cargo build
 ```
+
 We use `rustfmt` to automatically format and style all of our code. To install and use `rustfmt`:
 
 ```shell-session
@@ -54,15 +55,32 @@ issue, provide us with:
 * The expected result of following those steps
 * The actual result of following those steps
 
-Definitely file an issue if you see an unexpected panic originating from within `rust-dwp`!
-`rust-dwp` should never panic unless it is explicitly documented to panic in the specific
+Definitely file an issue if you see an unexpected panic originating from within `thorin`!
+`thorin` should never panic unless it is explicitly documented to panic in the specific
 circumstances provided.
+
+<br>
+
+#### Name
+<sup>
+<code>thorin</code> is named after <i>Thorin Oakenshield</i> from <i>The Hobbit</i>, as Thorin is
+a dwarf who leads other dwarves. <code>thorin</code> uses the <code>gimli</code> library
+(named after a dwarf from <i>Lord of the Rings</i>) to read <i>DWARF</i> format debug information,
+the name of which is a medieval fantasy complement to <i>ELF</i>, the file format for executables
+and object files.
+</sup>
+
+<br>
+
+<sub>
+You could also call this project <code>rust-dwp</code>, if you'd prefer that.
+</sub>
 
 <br>
 
 #### Author and acknowledgements
 <sup>
-<code>rust-dwp</code> is authored by <a href="https://davidtw.co">David Wood</a> of
+<code>thorin</code> is authored by <a href="https://davidtw.co">David Wood</a> of
 <i>Huawei Technologies Research & Development (UK) Ltd</i>.
 </sup>
 
@@ -71,8 +89,10 @@ circumstances provided.
 <sub>
 In addition, thanks to the authors of <code>object</code> and <code>gimli</code>, on which this
 utility depends heavily; and to <a href="https://github.com/philipc">Philip Craig</a> for advice
-and reviews during initial implementation of <code>rust-dwp</code>.
+and reviews during initial implementation of <code>thorin</code>.
 </sub>
+
+<br>
 
 #### License
 <sup>
@@ -87,6 +107,8 @@ Unless you explicitly state otherwise, any contribution intentionally submitted 
 this crate by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without
 any additional terms or conditions.
 </sub>
+
+<br>
 
 #### Code of conduct
 <sup>

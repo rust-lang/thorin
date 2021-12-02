@@ -27,7 +27,7 @@ mod strings;
 mod util;
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "rust-dwp", about = "merge dwarf objects into dwarf packages")]
+#[structopt(name = "thorin", about = "merge dwarf objects into dwarf packages")]
 struct Opt {
     /// Specify path to input dwarf objects and packages
     #[structopt(parse(from_os_str))]

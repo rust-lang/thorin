@@ -331,23 +331,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f497285884f3fcff424ffc933e56d7cbca511def0c9831a7f9b5f6153e3cc89b"
 
 [[package]]
-name = "rust-dwp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "gimli",
- "indexmap",
- "memmap2",
- "object",
- "structopt",
- "thiserror",
- "tracing",
- "tracing-subscriber",
- "tracing-tree",
- "typed-arena",
-]
-
-[[package]]
 name = "ryu"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -468,6 +451,23 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "thorin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gimli",
+ "indexmap",
+ "memmap2",
+ "object",
+ "structopt",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+ "tracing-tree",
+ "typed-arena",
 ]
 
 [[package]]
