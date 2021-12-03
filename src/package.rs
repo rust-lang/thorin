@@ -8,7 +8,7 @@ use object::{
     BinaryFormat, Object, ObjectSection,
 };
 use std::{collections::HashSet, fmt};
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 use typed_arena::Arena;
 
 use crate::{
@@ -285,7 +285,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
     /// Append the contents of a section from the input DWARF object to the equivalent section in
     /// the output object, with no further processing.
     #[tracing::instrument(level = "trace", skip(input))]
-    fn append_section<'input, 'output>(
+    fn append_section<'input>(
         &mut self,
         input: &object::File<'input>,
         input_id: gimli::SectionId,
@@ -316,7 +316,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
     /// the in-progress `.debug_str` (`DwpStringTable`) and building a new `.debug_str_offsets.dwo`
     /// to be the current DWARF object's contribution to the DWARF package.
     #[tracing::instrument(level = "trace", skip(arena_compression, input, input_dwarf))]
-    fn append_str_offsets<'input, 'output, 'arena: 'input>(
+    fn append_str_offsets<'input, 'arena: 'input>(
         &mut self,
         arena_compression: &'arena Arena<Vec<u8>>,
         input: &object::File<'input>,
@@ -409,7 +409,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
         level = "trace",
         skip(arena_compression, section, unit, append_cu_contribution, append_tu_contribution)
     )]
-    fn append_unit<'input, 'arena: 'input, 'output: 'arena, CuOp, Sect, TuOp>(
+    fn append_unit<'input, 'arena: 'input, CuOp, Sect, TuOp>(
         &mut self,
         arena_compression: &'arena Arena<Vec<u8>>,
         section: &Sect,
@@ -438,7 +438,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                 debug!(?dwo_id, "compilation unit");
                 if self.seen_units.contains(&DwarfObjectIdentifier::Compilation(dwo_id)) {
                     // Return early if a unit with this type signature has already been seen.
-                    warn!("skipping {:?}, already seen", dwo_id);
+                    debug!(?dwo_id, "skipping, already seen");
                     return Ok(());
                 }
 
@@ -467,7 +467,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                 debug!(?type_signature, "type unit");
                 if self.seen_units.contains(&DwarfObjectIdentifier::Type(type_signature)) {
                     // Return early if a unit with this type signature has already been seen.
-                    warn!("skipping {:?}, already seen", type_signature);
+                    debug!(?type_signature, "skipping, already seen");
                     return Ok(());
                 }
 
@@ -505,7 +505,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                 Ok(())
             }
             (_, Some(..)) => {
-                warn!("unit in dwarf object is not a split unit, skipping");
+                debug!("unit in dwarf object is not a split unit, skipping");
                 Ok(())
             }
             (_, None) => Ok(()),
@@ -515,7 +515,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
     /// Process a DWARF object. Copies relevant sections, compilation/type units and strings from
     /// DWARF object into output object.
     #[tracing::instrument(level = "trace", skip(arena_compression, input, input_dwarf))]
-    pub(crate) fn append_dwarf_object<'input, 'output, 'arena: 'input>(
+    pub(crate) fn append_dwarf_object<'input, 'arena: 'input>(
         &mut self,
         arena_compression: &'arena Arena<Vec<u8>>,
         input: &object::File<'input>,

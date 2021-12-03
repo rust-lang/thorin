@@ -7,7 +7,7 @@ use std::{
     io::{BufWriter, Write},
     path::PathBuf,
 };
-use tracing::{debug, warn};
+use tracing::{debug, trace};
 use typed_arena::Arena;
 
 use crate::{
@@ -41,7 +41,7 @@ fn process_input_file<'input, 'arena: 'input>(
     path: &str,
     obj: &object::File<'input>,
     output_object_inputs: &mut Option<(PackageFormat, Architecture, Endianness)>,
-    output: &mut Option<OutputPackage<RunTimeEndian>>,
+    output: &mut Option<OutputPackage<'_, RunTimeEndian>>,
 ) -> Result<()> {
     let mut load_dwo_section = |id: gimli::SectionId| -> Result<_> {
         load_file_section(id, &obj, true, &arena_data, &arena_relocations)
@@ -52,7 +52,7 @@ fn process_input_file<'input, 'arena: 'input>(
     let root_header = match dwarf.units().next().context(DwpError::ParseUnitHeader)? {
         Some(header) => header,
         None => {
-            warn!("input dwarf object has no units, skipping");
+            debug!("input dwarf object has no units, skipping");
             return Ok(());
         }
     };
@@ -124,12 +124,12 @@ pub fn package(
         let data = match open_and_mmap_input(&arena_mmap, &path) {
             Ok(data) => data,
             Err(e) => {
-                warn!(
-                    "Could not open `{}`! May fail if this file contains units referenced by \
-                     executable that are not otherwise found. {:?}",
-                    path.to_string_lossy(),
-                    e,
+                debug!(
+                    ?path,
+                    "could not open,m ay fail if this file contains units referenced by \
+                     executable that are not otherwise found.",
                 );
+                trace!(?e);
                 continue;
             }
         };
@@ -177,9 +177,9 @@ pub fn package(
                 )?;
             }
             _ => {
-                warn!(
-                    "Input file `{}` is not an archive or elf object, skipping...",
-                    path.to_string_lossy()
+                debug!(
+                    ?path,
+                    "input file is not an archive or elf object, skipping...",
                 );
             }
         }
