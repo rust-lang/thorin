@@ -1,21 +1,23 @@
 use anyhow::{Context, Result};
 use gimli::RunTimeEndian;
 use object::{write::StreamingBuffer, Architecture, Endianness, FileKind, Object};
-use std::borrow::Cow;
-use std::collections::HashSet;
-use std::io::{self, BufWriter, Write};
-use std::path::PathBuf;
+use std::{
+    borrow::Cow,
+    collections::HashSet,
+    io::{self, BufWriter, Write},
+    path::PathBuf,
+};
 use structopt::StructOpt;
 use tracing::{debug, trace, warn};
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
 use tracing_tree::HierarchicalLayer;
 use typed_arena::Arena;
 
-use crate::error::DwpError;
-use crate::package::{OutputPackage, PackageFormat};
-use crate::relocate::RelocationMap;
-use crate::util::{
-    load_file_section, load_object_file, open_and_mmap_input, parse_executable, Output,
+use crate::{
+    error::DwpError,
+    package::{OutputPackage, PackageFormat},
+    relocate::RelocationMap,
+    util::{load_file_section, load_object_file, open_and_mmap_input, parse_executable, Output},
 };
 
 mod error;

@@ -14,6 +14,7 @@ use std::{
     os::unix::fs::FileTypeExt,
     path::{Path, PathBuf},
 };
+use tracing::debug;
 use typed_arena::Arena;
 
 use crate::{
@@ -443,6 +444,7 @@ pub(crate) fn parse_executable<'input, 'arena: 'input>(
         } else {
             return Ok(None);
         };
+    debug!(?format);
 
     let mut iter = dwarf.units();
     while let Some(header) = iter.next().context(DwpError::ParseUnitHeader)? {
@@ -453,9 +455,11 @@ pub(crate) fn parse_executable<'input, 'arena: 'input>(
             // normal type units in an executable, but should we expect to find a corresponding
             // split type unit for those?).
             if matches!(target, DwarfObjectIdentifier::Compilation(_)) {
+                debug!(?target, "adding target");
                 target_dwarf_objects.insert(target);
             }
 
+            debug!(?path, "adding path");
             dwarf_object_paths.push(path);
         }
     }
