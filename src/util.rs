@@ -37,7 +37,7 @@ pub(crate) fn dwo_name(id: gimli::SectionId) -> &'static str {
 }
 
 /// Returns the gimli `RunTimeEndian` corresponding to a object `Endianness`.
-pub(crate) fn runtime_endian_from_endianness<'a>(endianness: Endianness) -> RunTimeEndian {
+pub(crate) fn runtime_endian_from_endianness(endianness: Endianness) -> RunTimeEndian {
     match endianness {
         Endianness::Little => RunTimeEndian::Little,
         Endianness::Big => RunTimeEndian::Big,
