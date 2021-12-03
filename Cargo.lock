@@ -27,12 +27,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anyhow"
-version = "1.0.45"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee10e43ae4a853c0a3591d4e2ada1719e553be18199d9da9d4a83f5927c2f5c7"
-
-[[package]]
 name = "atty"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -457,7 +451,6 @@ dependencies = [
 name = "thorin"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "gimli",
  "indexmap",
  "memmap2",
@@ -471,7 +464,6 @@ dependencies = [
 name = "thorin-bin"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "structopt",
  "thorin",
  "tracing",

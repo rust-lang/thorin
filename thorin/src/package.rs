@@ -1,4 +1,3 @@
-use anyhow::{anyhow, Context, Result};
 use gimli::{
     write::EndianVec, write::Writer, DebugStrOffsetsBase, DebugStrOffsetsIndex, DwarfFileType,
     Encoding, Format, Reader, RunTimeEndian, UnitType,
@@ -12,7 +11,7 @@ use tracing::{debug, trace};
 use typed_arena::Arena;
 
 use crate::{
-    error::DwpError,
+    error::{DwpError, Result},
     index::{
         Bucketable, Contribution, ContributionOffset, CuIndexEntry, IndexCollection, TuIndexEntry,
     },
@@ -70,7 +69,7 @@ impl Default for PackageFormat {
 /// New-type'd index (constructed from `gimli::DwoId`) with a custom `Debug` implementation to
 /// print in hexadecimal.
 #[derive(Copy, Clone, Eq, Hash, PartialEq)]
-pub(crate) struct DwoId(pub(crate) u64);
+pub struct DwoId(pub(crate) u64);
 
 impl Bucketable for DwoId {
     fn index(&self) -> u64 {
@@ -93,7 +92,7 @@ impl From<gimli::DwoId> for DwoId {
 /// New-type'd index (constructed from `gimli::DebugTypeSignature`) with a custom `Debug`
 /// implementation to print in hexadecimal.
 #[derive(Copy, Clone, Eq, Hash, PartialEq)]
-pub(crate) struct DebugTypeSignature(pub(crate) u64);
+pub struct DebugTypeSignature(pub(crate) u64);
 
 impl Bucketable for DebugTypeSignature {
     fn index(&self) -> u64 {
@@ -115,7 +114,7 @@ impl From<gimli::DebugTypeSignature> for DebugTypeSignature {
 
 /// Identifier for a DWARF object.
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum DwarfObjectIdentifier {
+pub enum DwarfObjectIdentifier {
     /// `DwoId` identifying compilation units.
     Compilation(DwoId),
     /// `DebugTypeSignature` identifying type units.
@@ -289,8 +288,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
         &mut self,
         input: &object::File<'input>,
         input_id: gimli::SectionId,
-        required: bool,
-    ) -> Result<Option<Contribution>> {
+    ) -> object::Result<Option<Contribution>> {
         let name = dwo_name(input_id);
         match input.section_by_name(name) {
             Some(section) => {
@@ -304,7 +302,6 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                     Ok(None)
                 }
             }
-            None if required => Err(anyhow!(DwpError::MissingRequiredSection(name.to_string()))),
             None => {
                 trace!("section doesn't exist");
                 Ok(None)
@@ -363,17 +360,17 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
             let dwo_offset = input_dwarf
                 .debug_str_offsets
                 .get_str_offset(encoding.format, base, dwo_index)
-                .context(DwpError::OffsetAtIndex(i))?;
+                .map_err(|e| DwpError::OffsetAtIndex(e, i))?;
             let dwo_str = input_dwarf
                 .debug_str
                 .get_str(dwo_offset)
-                .context(DwpError::StrAtOffset(dwo_offset.0))?;
+                .map_err(|e| DwpError::StrAtOffset(e, dwo_offset.0))?;
             let dwo_str = dwo_str.to_string()?;
 
             let dwp_offset = self
                 .string_table
                 .get_or_insert(dwo_str.as_ref())
-                .context(DwpError::WritingStrToStringTable)?;
+                .map_err(DwpError::WritingStrToStringTable)?;
             debug!(?i, ?dwo_str, "dwo_offset={:#x} dwp_offset={:#x}", dwo_offset.0, dwp_offset.0);
 
             match encoding.format {
@@ -447,7 +444,8 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                     .expect("offset from `.debug_info.dwo` section is not a `DebugInfoOffset`")
                     .0;
                 let data = section
-                    .compressed_data_range(arena_compression, offset.try_into().unwrap(), size)?
+                    .compressed_data_range(arena_compression, offset.try_into().unwrap(), size)
+                    .map_err(DwpError::DecompressData)?
                     .ok_or(DwpError::EmptyUnit(dwo_id.0))?;
 
                 if !data.is_empty() {
@@ -488,7 +486,8 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                     }
                 };
                 let data = section
-                    .compressed_data_range(arena_compression, offset.try_into().unwrap(), size)?
+                    .compressed_data_range(arena_compression, offset.try_into().unwrap(), size)
+                    .map_err(DwpError::DecompressData)?
                     .ok_or(DwpError::EmptyUnit(type_signature.0))?;
 
                 if !data.is_empty() {
@@ -528,58 +527,55 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
         // Concatenate contents of sections from the DWARF object into the corresponding section in
         // the output.
         let debug_abbrev = self
-            .append_section(&input, DebugAbbrev, true)
-            .context(DwpError::ConcatenatingSection(".debug_abbrev.dwo"))?
-            .expect("required section didn't return error");
+            .append_section(&input, DebugAbbrev)
+            .map_err(|e| DwpError::AppendSection(e, ".debug_abbrev.dwo"))?
+            .ok_or(DwpError::MissingRequiredSection(".debug_abbrev.dwo"))?;
         let debug_line = self
-            .append_section(&input, DebugLine, false)
-            .context(DwpError::ConcatenatingSection(".debug_line.dwo"))?;
+            .append_section(&input, DebugLine)
+            .map_err(|e| DwpError::AppendSection(e, ".debug_line.dwo"))?;
         let debug_macro = self
-            .append_section(&input, DebugMacro, false)
-            .context(DwpError::ConcatenatingSection(".debug_macro.dwo"))?;
+            .append_section(&input, DebugMacro)
+            .map_err(|e| DwpError::AppendSection(e, ".debug_macro.dwo"))?;
 
         let (debug_loc, debug_macinfo, debug_loclists, debug_rnglists) = match self.format {
             PackageFormat::GnuExtension => {
                 // Only `.debug_loc.dwo` and `.debug_macinfo.dwo` with the GNU extension.
                 let debug_loc = self
-                    .append_section(&input, DebugLoc, false)
-                    .context(DwpError::ConcatenatingSection(".debug_loc.dwo"))?;
+                    .append_section(&input, DebugLoc)
+                    .map_err(|e| DwpError::AppendSection(e, ".debug_loc.dwo"))?;
                 let debug_macinfo = self
-                    .append_section(&input, DebugMacinfo, false)
-                    .context(DwpError::ConcatenatingSection(".debug_macinfo.dwo"))?;
+                    .append_section(&input, DebugMacinfo)
+                    .map_err(|e| DwpError::AppendSection(e, ".debug_macinfo.dwo"))?;
                 (debug_loc, debug_macinfo, None, None)
             }
             PackageFormat::DwarfStd => {
                 // Only `.debug_loclists.dwo` and `.debug_rnglists.dwo` with DWARF 5.
                 let debug_loclists = self
-                    .append_section(&input, DebugLocLists, false)
-                    .context(DwpError::ConcatenatingSection(".debug_loclists.dwo"))?;
+                    .append_section(&input, DebugLocLists)
+                    .map_err(|e| DwpError::AppendSection(e, ".debug_loclists.dwo"))?;
                 let debug_rnglists = self
-                    .append_section(&input, DebugRngLists, false)
-                    .context(DwpError::ConcatenatingSection(".debug_rnglists.dwo"))?;
+                    .append_section(&input, DebugRngLists)
+                    .map_err(|e| DwpError::AppendSection(e, ".debug_rnglists.dwo"))?;
                 (None, None, debug_loclists, debug_rnglists)
             }
         };
 
         // Concatenate string offsets from the DWARF object into the `.debug_str_offsets` section
         // in the output, rewriting offsets to be based on the new, merged string table.
-        let debug_str_offsets = self
-            .append_str_offsets(arena_compression, &input, &input_dwarf, encoding, format)
-            .context(DwpError::AddingStrOffsets)?;
+        let debug_str_offsets =
+            self.append_str_offsets(arena_compression, &input, &input_dwarf, encoding, format)?;
 
         // Load index sections (if they exist).
         let cu_index = maybe_load_index_section::<_, gimli::DebugCuIndex<_>, _>(
             arena_compression,
             self.endian,
             input,
-        )
-        .context(DwpError::LoadCuIndex)?;
+        )?;
         let tu_index = maybe_load_index_section::<_, gimli::DebugTuIndex<_>, _>(
             arena_compression,
             self.endian,
             input,
-        )
-        .context(DwpError::LoadTuIndex)?;
+        )?;
 
         // Create offset adjustor functions, see comment on `create_contribution_adjustor` for
         // explanation.
@@ -611,34 +607,26 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
         let debug_info_name = gimli::SectionId::DebugInfo.dwo_name().unwrap();
         let debug_info_section = input
             .section_by_name(debug_info_name)
-            .with_context(|| DwpError::MissingRequiredSection(debug_info_name.to_string()))?;
+            .ok_or(DwpError::MissingRequiredSection(".debug_info.dwo"))?;
 
         // Append compilation (and type units, in DWARF 5) from `.debug_info`.
         let mut iter = input_dwarf.units();
-        while let Some(header) = iter.next().context(DwpError::ParseUnitHeader)? {
-            let unit = input_dwarf.unit(header).context(DwpError::ParseUnit)?;
+        while let Some(header) = iter.next().map_err(DwpError::ParseUnitHeader)? {
+            let unit = input_dwarf.unit(header).map_err(DwpError::ParseUnit)?;
             self.append_unit(
                 arena_compression,
                 &debug_info_section,
                 &unit,
                 |this, dwo_id, debug_info| {
-                    let debug_abbrev = abbrev_cu_adjustor(dwo_id, Some(debug_abbrev))
-                        .context(DwpError::AdjustingContribution(".debug_abbrev.dwo"))?
+                    let debug_abbrev = abbrev_cu_adjustor(dwo_id, Some(debug_abbrev))?
                         .expect("mandatory section cannot be adjusted");
-                    let debug_line = line_cu_adjustor(dwo_id, debug_line)
-                        .context(DwpError::AdjustingContribution(".debug_line.dwo"))?;
-                    let debug_loc = loc_cu_adjustor(dwo_id, debug_loc)
-                        .context(DwpError::AdjustingContribution(".debug_loc.dwo"))?;
-                    let debug_loclists = loclists_cu_adjustor(dwo_id, debug_loclists)
-                        .context(DwpError::AdjustingContribution(".debug_loclists.dwo"))?;
-                    let debug_rnglists = rnglists_cu_adjustor(dwo_id, debug_rnglists)
-                        .context(DwpError::AdjustingContribution(".debug_rnglists.dwo"))?;
-                    let debug_str_offsets = str_offsets_cu_adjustor(dwo_id, debug_str_offsets)
-                        .context(DwpError::AdjustingContribution(".debug_str_offsets.dwo"))?;
-                    let debug_macinfo = macinfo_cu_adjustor(dwo_id, debug_macinfo)
-                        .context(DwpError::AdjustingContribution(".debug_macinfo.dwo"))?;
-                    let debug_macro = macro_cu_adjustor(dwo_id, debug_macro)
-                        .context(DwpError::AdjustingContribution(".debug_macro.dwo"))?;
+                    let debug_line = line_cu_adjustor(dwo_id, debug_line)?;
+                    let debug_loc = loc_cu_adjustor(dwo_id, debug_loc)?;
+                    let debug_loclists = loclists_cu_adjustor(dwo_id, debug_loclists)?;
+                    let debug_rnglists = rnglists_cu_adjustor(dwo_id, debug_rnglists)?;
+                    let debug_str_offsets = str_offsets_cu_adjustor(dwo_id, debug_str_offsets)?;
+                    let debug_macinfo = macinfo_cu_adjustor(dwo_id, debug_macinfo)?;
+                    let debug_macro = macro_cu_adjustor(dwo_id, debug_macro)?;
 
                     this.cu_index_entries.push(CuIndexEntry {
                         dwo_id,
@@ -655,13 +643,10 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                     Ok(())
                 },
                 |this, type_sig, debug_info| {
-                    let debug_abbrev = abbrev_tu_adjustor(type_sig, Some(debug_abbrev))
-                        .context(DwpError::AdjustingContribution(".debug_abbrev.dwo"))?
+                    let debug_abbrev = abbrev_tu_adjustor(type_sig, Some(debug_abbrev))?
                         .expect("mandatory section cannot be adjusted");
-                    let debug_line = line_tu_adjustor(type_sig, debug_line)
-                        .context(DwpError::AdjustingContribution(".debug_line.dwo"))?;
-                    let debug_str_offsets = str_offsets_tu_adjustor(type_sig, debug_str_offsets)
-                        .context(DwpError::AdjustingContribution(".debug_str_offsets.dwo"))?;
+                    let debug_line = line_tu_adjustor(type_sig, debug_line)?;
+                    let debug_str_offsets = str_offsets_tu_adjustor(type_sig, debug_str_offsets)?;
 
                     this.tu_index_entries.push(TuIndexEntry {
                         type_signature: type_sig,
@@ -672,8 +657,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                     });
                     Ok(())
                 },
-            )
-            .context(DwpError::AddingUnitsFromSection(".debug_info.dwo"))?;
+            )?;
         }
 
         // Append type units from `.debug_info` with the GNU extension.
@@ -682,8 +666,8 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
             let debug_types_name = gimli::SectionId::DebugTypes.dwo_name().unwrap();
             if let Some(debug_types_section) = input.section_by_name(debug_types_name) {
                 let mut iter = input_dwarf.type_units();
-                while let Some(header) = iter.next().context(DwpError::ParseUnitHeader)? {
-                    let unit = input_dwarf.unit(header).context(DwpError::ParseUnit)?;
+                while let Some(header) = iter.next().map_err(DwpError::ParseUnitHeader)? {
+                    let unit = input_dwarf.unit(header).map_err(DwpError::ParseUnit)?;
                     self.append_unit(
                         arena_compression,
                         &debug_types_section,
@@ -693,15 +677,11 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                             Ok(())
                         },
                         |this, type_sig, debug_info_or_types| {
-                            let debug_abbrev = abbrev_tu_adjustor(type_sig, Some(debug_abbrev))
-                                .context(DwpError::AdjustingContribution(".debug_abbrev.dwo"))?
+                            let debug_abbrev = abbrev_tu_adjustor(type_sig, Some(debug_abbrev))?
                                 .expect("mandatory section cannot be adjusted");
-                            let debug_line = line_tu_adjustor(type_sig, debug_line)
-                                .context(DwpError::AdjustingContribution(".debug_line.dwo"))?;
+                            let debug_line = line_tu_adjustor(type_sig, debug_line)?;
                             let debug_str_offsets =
-                                str_offsets_tu_adjustor(type_sig, debug_str_offsets).context(
-                                    DwpError::AdjustingContribution(".debug_str_offsets.dwo"),
-                                )?;
+                                str_offsets_tu_adjustor(type_sig, debug_str_offsets)?;
 
                             this.tu_index_entries.push(TuIndexEntry {
                                 type_signature: type_sig,
@@ -712,8 +692,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                             });
                             Ok(())
                         },
-                    )
-                    .context(DwpError::AddingUnitsFromSection(".debug_types.dwo"))?;
+                    )?;
                 }
             }
         }
@@ -724,7 +703,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
     pub(crate) fn verify(&self, targets: &HashSet<DwarfObjectIdentifier>) -> Result<()> {
         if targets.difference(&self.seen_units).count() != 0 {
             let missing = targets.difference(&self.seen_units).cloned().collect();
-            return Err(anyhow!(DwpError::MissingReferencedUnit(missing)));
+            return Err(DwpError::MissingReferencedUnit(missing));
         }
 
         Ok(())
@@ -738,11 +717,11 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
         debug!("writing cu index");
         self.cu_index_entries
             .write_index(self.endian, self.format, &mut self.obj, &mut self.debug_cu_index)
-            .context(DwpError::WriteCuIndex)?;
+            .map_err(DwpError::WriteCuIndex)?;
         debug!("writing tu index");
         self.tu_index_entries
             .write_index(self.endian, self.format, &mut self.obj, &mut self.debug_tu_index)
-            .context(DwpError::WriteTuIndex)?;
+            .map_err(DwpError::WriteTuIndex)?;
 
         // Write the contents of the entire object to the buffer.
         self.obj.emit(buffer).map_err(From::from)

@@ -1,5 +1,4 @@
-use anyhow::Result;
-use gimli::write::{EndianVec, Writer};
+use gimli::write::{EndianVec, Result, Writer};
 use object::write::Object;
 use std::fmt;
 use tracing::{debug, trace};

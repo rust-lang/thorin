@@ -1,4 +1,3 @@
-use anyhow::{anyhow, Context, Result};
 use gimli::{EndianSlice, RunTimeEndian, UnitIndex, UnitType};
 use memmap2::Mmap;
 use object::{
@@ -18,7 +17,7 @@ use tracing::debug;
 use typed_arena::Arena;
 
 use crate::{
-    error::DwpError,
+    error::{DwpError, Result},
     index::{Bucketable, Contribution, ContributionOffset},
     marker::HasGimliId,
     package::{DwarfObjectIdentifier, PackageFormat},
@@ -53,7 +52,7 @@ pub(crate) enum Output {
 
 impl Output {
     /// Create a `Output` from the input path (or "-" for stdout).
-    pub(crate) fn new(path: &OsStr) -> Result<Self> {
+    pub(crate) fn new(path: &OsStr) -> io::Result<Self> {
         if path == "-" {
             return Ok(Output::Stdout(io::stdout()));
         }
@@ -207,12 +206,16 @@ where
     // UNWRAP: `Index` types provided known to have `dwo_name` value.
     let index_name = Index::id().dwo_name().unwrap();
     if let Some(index_section) = input.section_by_name(index_name) {
-        let index_data = index_section.compressed_data()?.decompress()?;
+        let index_data = index_section
+            .compressed_data()
+            .and_then(|d| d.decompress())
+            .map_err(DwpError::DecompressData)?;
         let index_data_ref = match index_data {
             Cow::Borrowed(data) => data,
             Cow::Owned(data) => (*arena_compression.alloc(data)).borrow(),
         };
-        let unit_index = Index::new(index_data_ref, endian).index()?;
+        let unit_index =
+            Index::new(index_data_ref, endian).index().map_err(DwpError::ParseIndex)?;
         Ok(Some(unit_index))
     } else {
         Ok(None)
@@ -250,6 +253,7 @@ where
     R: gimli::Reader,
 {
     let mut adjustment = 0;
+    let target_gimli_id = Target::gimli_id();
 
     Box::new(
         move |identifier: Identifier,
@@ -258,13 +262,13 @@ where
             match (&index, contribution) {
                 // dwp input with section
                 (Some(index), Some(contribution)) => {
-                    let row_id = index
-                        .find(identifier.index())
-                        .context(DwpError::UnitNotInIndex(identifier.index()))?;
+                    let identifier = identifier.index();
+                    let row_id =
+                        index.find(identifier).ok_or(DwpError::UnitNotInIndex(identifier))?;
                     let section = index
                         .sections(row_id)
-                        .context(DwpError::RowNotInIndex(row_id))?
-                        .find(|index_section| index_section.section == Target::gimli_id())
+                        .map_err(|e| DwpError::RowNotInIndex(e, row_id))?
+                        .find(|index_section| index_section.section == target_gimli_id)
                         .ok_or(DwpError::SectionNotInRow)?;
                     let adjusted_offset: u64 = contribution.offset.0 + adjustment;
                     adjustment += section.size as u64;
@@ -351,7 +355,7 @@ pub(crate) fn dwo_id_and_path_of_unit<R: gimli::Reader>(
             // GNU Extension
             val
         } else {
-            return Err(anyhow!(DwpError::MissingDwoName(identifier.index())));
+            return Err(DwpError::MissingDwoName(identifier.index()));
         };
 
         dwarf.attr_string(&unit, dwo_name)?.to_string()?.into_owned()
@@ -375,8 +379,8 @@ pub(crate) fn open_and_mmap_input<'input, 'arena: 'input>(
     arena_mmap: &'arena Arena<Mmap>,
     path: &'input Path,
 ) -> Result<&'arena [u8]> {
-    let file = File::open(&path).context(DwpError::OpenObjectFile)?;
-    let mmap = (unsafe { Mmap::map(&file) }).context(DwpError::MmapObjectFile)?;
+    let file = File::open(&path).map_err(DwpError::OpenObjectFile)?;
+    let mmap = (unsafe { Mmap::map(&file) }).map_err(DwpError::MmapObjectFile)?;
     Ok((*arena_mmap.alloc(mmap)).borrow().as_ref())
 }
 
@@ -387,7 +391,7 @@ pub(crate) fn load_object_file<'input, 'arena: 'input>(
     path: &'input Path,
 ) -> Result<object::File<'arena>> {
     let data = open_and_mmap_input(arena_mmap, path)?;
-    object::File::parse(data).context(DwpError::ParseObjectFile)
+    object::File::parse(data).map_err(|e| DwpError::ParseObjectFile(e, path.display().to_string()))
 }
 
 /// Loads a section of a file from `object::File` into a `gimli::EndianSlice`. Expected to be
@@ -439,7 +443,7 @@ pub(crate) fn parse_executable<'input, 'arena: 'input>(
     let dwarf = gimli::Dwarf::load(&mut load_section)?;
 
     let format =
-        if let Some(root_header) = dwarf.units().next().context(DwpError::ParseUnitHeader)? {
+        if let Some(root_header) = dwarf.units().next().map_err(DwpError::ParseUnitHeader)? {
             PackageFormat::from_dwarf_version(root_header.version())
         } else {
             return Ok(None);
@@ -447,8 +451,8 @@ pub(crate) fn parse_executable<'input, 'arena: 'input>(
     debug!(?format);
 
     let mut iter = dwarf.units();
-    while let Some(header) = iter.next().context(DwpError::ParseUnitHeader)? {
-        let unit = dwarf.unit(header).context(DwpError::ParseUnit)?;
+    while let Some(header) = iter.next().map_err(DwpError::ParseUnitHeader)? {
+        let unit = dwarf.unit(header).map_err(DwpError::ParseUnit)?;
         if let Some((target, path)) = dwo_id_and_path_of_unit(&dwarf, &unit)? {
             // Only add `DwoId`s to the target vector, not `DebugTypeSignature`s. There doesn't
             // appear to be a "skeleton type unit" to find the corresponding unit of (there are

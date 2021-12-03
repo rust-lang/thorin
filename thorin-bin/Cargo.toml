@@ -10,7 +10,6 @@ edition = "2021"
 [dependencies]
 thorin = { path = "../thorin" }
 
-anyhow = "1.0.45"
 structopt = "0.3.25"
 tracing = "0.1.29"
 tracing-subscriber = { version = "0.2.25", features = [ "env-filter" ] }
