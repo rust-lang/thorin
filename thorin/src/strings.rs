@@ -1,6 +1,5 @@
-use anyhow::Result;
 use gimli::{
-    write::{EndianVec, Writer},
+    write::{EndianVec, Result, Writer},
     DebugStrOffset,
 };
 use indexmap::IndexSet;

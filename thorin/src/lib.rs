@@ -1,4 +1,3 @@
-use anyhow::{Context, Result};
 use gimli::RunTimeEndian;
 use object::{write::StreamingBuffer, Architecture, Endianness, FileKind, Object};
 use std::{
@@ -11,11 +10,13 @@ use tracing::{debug, trace};
 use typed_arena::Arena;
 
 use crate::{
-    error::DwpError,
+    error::Result,
     package::{OutputPackage, PackageFormat},
     relocate::RelocationMap,
     util::{load_file_section, load_object_file, open_and_mmap_input, parse_executable, Output},
 };
+
+pub use crate::error::DwpError;
 
 mod error;
 mod index;
@@ -47,9 +48,8 @@ fn process_input_file<'input, 'arena: 'input>(
         load_file_section(id, &obj, true, &arena_data, &arena_relocations)
     };
 
-    let dwarf = gimli::Dwarf::load(&mut load_dwo_section)
-        .with_context(|| DwpError::LoadInputDwarfObject(String::from(path)))?;
-    let root_header = match dwarf.units().next().context(DwpError::ParseUnitHeader)? {
+    let dwarf = gimli::Dwarf::load(&mut load_dwo_section)?;
+    let root_header = match dwarf.units().next().map_err(DwpError::ParseUnitHeader)? {
         Some(header) => header,
         None => {
             debug!("input dwarf object has no units, skipping");
@@ -68,9 +68,13 @@ fn process_input_file<'input, 'arena: 'input>(
     }
 
     if let Some(output) = output {
-        output
-            .append_dwarf_object(&arena_compression, &obj, &dwarf, root_header.encoding(), format)
-            .with_context(|| DwpError::AddingDwarfObjectToOutput(String::from(path)))?;
+        output.append_dwarf_object(
+            &arena_compression,
+            &obj,
+            &dwarf,
+            root_header.encoding(),
+            format,
+        )?;
     }
 
     Ok(())
@@ -98,18 +102,14 @@ pub fn package(
 
     if let Some(executables) = executables {
         for executable in executables {
-            let obj = load_object_file(&arena_mmap, &executable)
-                .with_context(|| DwpError::LoadingExecutable(executable.display().to_string()))?;
+            let obj = load_object_file(&arena_mmap, &executable)?;
             let found_output_object_inputs = parse_executable(
                 &arena_data,
                 &arena_relocations,
                 &obj,
                 &mut target_dwarf_objects,
                 &mut dwarf_object_paths,
-            )
-            .with_context(|| {
-                DwpError::FindingDwarfObjectsInExecutable(executable.display().to_string())
-            })?;
+            )?;
 
             output_object_inputs = output_object_inputs.or(found_output_object_inputs);
         }
@@ -134,22 +134,23 @@ pub fn package(
             }
         };
 
-        match FileKind::parse(data).context(DwpError::ParseFileKind)? {
+        match FileKind::parse(data).map_err(DwpError::ParseFileKind)? {
             FileKind::Archive => {
                 let archive = object::read::archive::ArchiveFile::parse(data)
-                    .context(DwpError::ParseArchiveFile)?;
+                    .map_err(|e| DwpError::ParseArchiveFile(e, path.display().to_string()))?;
 
                 for member in archive.members() {
-                    let member = member.context(DwpError::ParseArchiveMember)?;
+                    let member = member.map_err(DwpError::ParseArchiveMember)?;
                     let data = member.data(data)?;
                     if matches!(
-                        FileKind::parse(data).context(DwpError::ParseFileKind)?,
+                        FileKind::parse(data).map_err(DwpError::ParseFileKind)?,
                         FileKind::Elf32 | FileKind::Elf64
                     ) {
                         let name = path.display().to_string()
                             + ":"
                             + &String::from_utf8_lossy(member.name());
-                        let obj = object::File::parse(data).context(DwpError::ParseObjectFile)?;
+                        let obj = object::File::parse(data)
+                            .map_err(|e| DwpError::ParseObjectFile(e, name.clone()))?;
                         process_input_file(
                             &arena_compression,
                             &arena_data,
@@ -165,7 +166,8 @@ pub fn package(
                 }
             }
             FileKind::Elf32 | FileKind::Elf64 => {
-                let obj = object::File::parse(data).context(DwpError::ParseObjectFile)?;
+                let obj = object::File::parse(data)
+                    .map_err(|e| DwpError::ParseObjectFile(e, path.display().to_string()))?;
                 process_input_file(
                     &arena_compression,
                     &arena_data,
@@ -177,10 +179,7 @@ pub fn package(
                 )?;
             }
             _ => {
-                debug!(
-                    ?path,
-                    "input file is not an archive or elf object, skipping...",
-                );
+                debug!(?path, "input file is not an archive or elf object, skipping...",);
             }
         }
     }
@@ -189,11 +188,11 @@ pub fn package(
         output.verify(&target_dwarf_objects)?;
 
         let output_stream = Output::new(output_path.as_ref())
-            .with_context(|| DwpError::CreateOutputFile(output_path.display().to_string()))?;
+            .map_err(|e| DwpError::CreateOutputFile(e, output_path.display().to_string()))?;
         let mut output_stream = StreamingBuffer::new(BufWriter::new(output_stream));
-        output.emit(&mut output_stream).context(DwpError::WriteInMemoryRepresentation)?;
-        output_stream.result().context(DwpError::WriteBuffer)?;
-        output_stream.into_inner().flush().context(DwpError::FlushBufferedWriter)?;
+        output.emit(&mut output_stream)?;
+        output_stream.result().map_err(DwpError::WriteBuffer)?;
+        output_stream.into_inner().flush().map_err(DwpError::FlushBufferedWriter)?;
     }
 
     Ok(())

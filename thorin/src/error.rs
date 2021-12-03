@@ -2,23 +2,27 @@ use thiserror::Error;
 
 use crate::package::DwarfObjectIdentifier;
 
+pub(crate) type Result<T> = std::result::Result<T, DwpError>;
+
 /// Diagnostics (and contexts) emitted during DWARF packaging.
 #[derive(Debug, Error)]
-pub(crate) enum DwpError {
+pub enum DwpError {
     #[error("Failed to open object file")]
-    OpenObjectFile,
+    OpenObjectFile(#[source] std::io::Error),
     #[error("Failed to mmap object file")]
-    MmapObjectFile,
+    MmapObjectFile(#[source] std::io::Error),
     #[error("Failed to parse kind of input file")]
-    ParseFileKind,
-    #[error("Failed to parse object file")]
-    ParseObjectFile,
-    #[error("Failed to parse archive file")]
-    ParseArchiveFile,
+    ParseFileKind(#[source] object::Error),
+    #[error("Failed to parse object file `{1}`")]
+    ParseObjectFile(#[source] object::Error, String),
+    #[error("Failed to parse archive file `{1}`")]
+    ParseArchiveFile(#[source] object::Error, String),
     #[error("Failed to parse archive member")]
-    ParseArchiveMember,
-    #[error("Section without name at offset 0x{0:08x}")]
-    NamelessSection(usize),
+    ParseArchiveMember(#[source] object::Error),
+    #[error("Failed to decompress data")]
+    DecompressData(#[source] object::Error),
+    #[error("Section without name at offset 0x{1:08x}")]
+    NamelessSection(#[source] object::Error, usize),
     #[error("Relocation with invalid symbol for section `{0}` at offset 0x{1:08x}")]
     RelocationWithInvalidSymbol(String, usize),
     #[error("Multiple relocations for section `{0}` at offset 0x{1:08x}")]
@@ -29,58 +33,53 @@ pub(crate) enum DwpError {
     LoadingExecutable(String),
     #[error("Missing path attribute to DWARF object 0x{0:08x}")]
     MissingDwoName(u64),
-    #[error("Failed finding DWARF objects in executable `{0}`")]
-    FindingDwarfObjectsInExecutable(String),
-    #[error("Failed to load input DWARF object `{0}`")]
-    LoadInputDwarfObject(String),
     #[error("Input DWARF object missing required section `{0}`")]
-    MissingRequiredSection(String),
+    MissingRequiredSection(&'static str),
     #[error("Failed to parse unit header")]
-    ParseUnitHeader,
+    ParseUnitHeader(#[source] gimli::read::Error),
     #[error("Failed to parse unit")]
-    ParseUnit,
-    #[error("Failed to concatenate `{0}` section from input DWARF object")]
-    ConcatenatingSection(&'static str),
-    #[error("Failed to remap `.debug_str_offsets.dwo` section")]
-    AddingStrOffsets,
+    ParseUnit(#[source] gimli::read::Error),
+    #[error("Failed to concatenate `{1}` section from input DWARF object")]
+    AppendSection(#[source] object::Error, &'static str),
     #[error("Failed to read header of `.debug_str_offsets.dwo` section")]
     StrOffsetsMissingHeader,
-    #[error("Failed to read offset at index {0} of `.debug_str_offsets.dwo` section")]
-    OffsetAtIndex(u64),
-    #[error("Failed to read string at offset {0:08x} of `.debug_str.dwo` section")]
-    StrAtOffset(usize),
+    #[error("Failed to read offset at index {1} of `.debug_str_offsets.dwo` section")]
+    OffsetAtIndex(#[source] gimli::read::Error, u64),
+    #[error("Failed to read string at offset {1:08x} of `.debug_str.dwo` section")]
+    StrAtOffset(#[source] gimli::read::Error, usize),
     #[error("Failed to write string to in-progress `.debug_str.dwo` section")]
-    WritingStrToStringTable,
-    #[error("Failed to parse `.debug_cu_index` of input DWARF package")]
-    LoadCuIndex,
-    #[error("Failed to parse `.debug_tu_index` of input DWARF package")]
-    LoadTuIndex,
+    WritingStrToStringTable(#[source] gimli::write::Error),
+    #[error("Failed to parse index section")]
+    ParseIndex(#[source] gimli::read::Error),
     #[error("Unit 0x{0:08x} from input DWARF package is not in its index")]
     UnitNotInIndex(u64),
     #[error("Row {0} found in index's hash table not present in index")]
-    RowNotInIndex(u32),
+    RowNotInIndex(#[source] gimli::read::Error, u32),
     #[error("Section not found in unit's row in index")]
     SectionNotInRow,
-    #[error("Failed to adjust contribution for section `{0}`")]
-    AdjustingContribution(&'static str),
     #[error("Unit `{0}` in input DWARF object with no data")]
     EmptyUnit(u64),
-    #[error("Failed to add units from section `{0}`")]
-    AddingUnitsFromSection(&'static str),
-    #[error("Failed adding input DWARF object `{0}` to DWARF package")]
-    AddingDwarfObjectToOutput(String),
     #[error("Failed to write `.debug_cu_index` of output DWARF package")]
-    WriteCuIndex,
+    WriteCuIndex(#[source] gimli::write::Error),
     #[error("Failed to write `.debug_tu_index` of output DWARF package")]
-    WriteTuIndex,
-    #[error("Failed to create output object `{0}`")]
-    CreateOutputFile(String),
+    WriteTuIndex(#[source] gimli::write::Error),
+    #[error("Failed to create output object `{1}`")]
+    CreateOutputFile(#[source] std::io::Error, String),
     #[error("Unit(s) {0:?} was referenced by executable but not found")]
     MissingReferencedUnit(Vec<DwarfObjectIdentifier>),
-    #[error("Failed to write in-memory output object to streaming buffer")]
-    WriteInMemoryRepresentation,
     #[error("Failed to write output object to buffer")]
-    WriteBuffer,
+    WriteBuffer(#[source] std::io::Error),
     #[error("Failed to write output object to disk")]
-    FlushBufferedWriter,
+    FlushBufferedWriter(#[source] std::io::Error),
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    ObjectRead(#[from] object::Error),
+    #[error(transparent)]
+    ObjectWrite(#[from] object::write::Error),
+    #[error(transparent)]
+    GimliRead(#[from] gimli::read::Error),
+    #[error(transparent)]
+    GimliWrite(#[from] gimli::write::Error),
 }

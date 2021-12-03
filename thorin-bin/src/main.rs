@@ -1,11 +1,8 @@
-use anyhow::Result;
 use std::{io::stderr, path::PathBuf};
 use structopt::StructOpt;
 use tracing::trace;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
 use tracing_tree::HierarchicalLayer;
-
-use thorin::package;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "thorin", about = "merge dwarf objects into dwarf packages")]
@@ -21,7 +18,7 @@ struct Opt {
     output: PathBuf,
 }
 
-fn main() -> Result<()> {
+fn main() -> Result<(), thorin::DwpError> {
     let subscriber = Registry::default().with(EnvFilter::from_env("RUST_DWP_LOG")).with(
         HierarchicalLayer::default()
             .with_writer(stderr)
@@ -34,5 +31,5 @@ fn main() -> Result<()> {
     let opt = Opt::from_args();
     trace!(?opt);
 
-    package(opt.inputs, opt.executables, opt.output)
+    thorin::package(opt.inputs, opt.executables, opt.output)
 }

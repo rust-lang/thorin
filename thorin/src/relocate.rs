@@ -2,8 +2,7 @@
 //! to be fully relocated prior to parsing. Necessary to load object files that reference dwarf
 //! objects (not just executables). Implementation derived from Gimli's `dwarfdump` example.
 
-use crate::DwpError;
-use anyhow::{anyhow, Context, Result};
+use crate::{DwpError, Result};
 use gimli;
 use object::{Object, ObjectSection, ObjectSymbol, RelocationKind, RelocationTarget};
 use std::{borrow::Cow, collections::HashMap};
@@ -161,25 +160,28 @@ pub(crate) fn add_relocations(
                         relocation.set_addend(addend as i64);
                     }
                     Err(_) => {
-                        return Err(anyhow!(DwpError::RelocationWithInvalidSymbol(
-                            section.name().context(DwpError::NamelessSection(offset))?.to_string(),
+                        return Err(DwpError::RelocationWithInvalidSymbol(
+                            section
+                                .name()
+                                .map_err(|e| DwpError::NamelessSection(e, offset))?
+                                .to_string(),
                             offset,
-                        )));
+                        ));
                     }
                 }
             }
 
             if relocations.insert(offset, relocation).is_some() {
-                return Err(anyhow!(DwpError::MultipleRelocations(
-                    section.name().context(DwpError::NamelessSection(offset))?.to_string(),
+                return Err(DwpError::MultipleRelocations(
+                    section.name().map_err(|e| DwpError::NamelessSection(e, offset))?.to_string(),
                     offset,
-                )));
+                ));
             }
         } else {
-            return Err(anyhow!(DwpError::UnsupportedRelocation(
-                section.name().context(DwpError::NamelessSection(offset))?.to_string(),
+            return Err(DwpError::UnsupportedRelocation(
+                section.name().map_err(|e| DwpError::NamelessSection(e, offset))?.to_string(),
                 offset,
-            )));
+            ));
         }
     }
 
