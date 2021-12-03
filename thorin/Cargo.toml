@@ -1,0 +1,18 @@
+[package]
+name = "thorin"
+authors = [ "David Wood <david.wood@huawei.com>" ]
+description = "Merge dwarf objects into dwarf packages"
+license = "Apache-2.0/MIT"
+readme = "../README.md"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.45"
+gimli = "0.26.1"
+indexmap = "1.7.0"
+memmap2 = "0.5.0"
+object = { version  = "0.27.1", features = [ "archive", "read", "write", "compression" ] }
+thiserror = "1.0.30"
+tracing = "0.1.29"
+typed-arena = "2.0.1"

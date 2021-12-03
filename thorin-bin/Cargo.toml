@@ -1,0 +1,21 @@
+[package]
+name = "thorin-bin"
+authors = [ "David Wood <david.wood@huawei.com>" ]
+description = "Merge dwarf objects into dwarf packages"
+license = "Apache-2.0/MIT"
+readme = "../README.md"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+thorin = { path = "../thorin" }
+
+anyhow = "1.0.45"
+structopt = "0.3.25"
+tracing = "0.1.29"
+tracing-subscriber = { version = "0.2.25", features = [ "env-filter" ] }
+tracing-tree = "0.1.10"
+
+[[bin]]
+name = "thorin"
+path = "src/main.rs"
