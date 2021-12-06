@@ -10,7 +10,6 @@ use std::{
     ffi::OsStr,
     fs::{File, OpenOptions},
     io,
-    os::unix::fs::FileTypeExt,
     path::{Path, PathBuf},
 };
 use tracing::debug;
@@ -43,6 +42,19 @@ pub(crate) fn runtime_endian_from_endianness(endianness: Endianness) -> RunTimeE
     }
 }
 
+/// Returns `true` if the file type is a fifo.
+#[cfg(not(target_family = "unix"))]
+fn is_fifo(_: std::fs::FileType) -> bool {
+    false
+}
+
+/// Returns `true` if the file type is a fifo.
+#[cfg(target_family = "unix")]
+fn is_fifo(file_type: std::fs::FileType) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    file_type.is_fifo()
+}
+
 /// Wrapper around output writer which handles differences between stdout, file and pipe outputs.
 pub(crate) enum Output {
     Stdout(io::Stdout),
@@ -59,7 +71,7 @@ impl Output {
 
         let file =
             OpenOptions::new().read(true).write(true).create(true).truncate(true).open(path)?;
-        if file.metadata()?.file_type().is_fifo() {
+        if is_fifo(file.metadata()?.file_type()) {
             Ok(Output::File(file))
         } else {
             Ok(Output::Pipe(file))
