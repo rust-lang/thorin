@@ -1,7 +1,5 @@
 use thiserror::Error;
 
-use crate::package::DwarfObjectIdentifier;
-
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 /// Diagnostics (and contexts) emitted during DWARF packaging.
@@ -11,12 +9,14 @@ pub enum Error {
     ReadInput(#[source] std::io::Error),
     #[error("Failed to parse kind of input file")]
     ParseFileKind(#[source] object::Error),
-    #[error("Failed to parse object file `{1}`")]
-    ParseObjectFile(#[source] object::Error, String),
-    #[error("Failed to parse archive file `{1}`")]
-    ParseArchiveFile(#[source] object::Error, String),
+    #[error("Failed to parse object file")]
+    ParseObjectFile(#[source] object::Error),
+    #[error("Failed to parse archive file")]
+    ParseArchiveFile(#[source] object::Error),
     #[error("Failed to parse archive member")]
     ParseArchiveMember(#[source] object::Error),
+    #[error("Input is not an archive or elf file")]
+    InvalidInputKind,
     #[error("Failed to decompress data")]
     DecompressData(#[source] object::Error),
     #[error("Section without name at offset 0x{1:08x}")]
@@ -61,8 +61,8 @@ pub enum Error {
     WriteCuIndex(#[source] gimli::write::Error),
     #[error("Failed to write `.debug_tu_index` of output DWARF package")]
     WriteTuIndex(#[source] gimli::write::Error),
-    #[error("Unit(s) {0:?} was referenced by executable but not found")]
-    MissingReferencedUnit(Vec<DwarfObjectIdentifier>),
+    #[error("Unit 0x{0:08x} was referenced by executable but not found")]
+    MissingReferencedUnit(u64),
     #[error("No output object was created from inputs")]
     NoOutputObjectCreated,
 

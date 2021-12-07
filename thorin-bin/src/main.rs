@@ -17,8 +17,6 @@ use typed_arena::Arena;
 
 #[derive(Debug, Error)]
 enum Error {
-    #[error("Failed to create DWARF package")]
-    Packaging(#[source] thorin::Error),
     #[error("Failed to create output object `{1}`")]
     CreateOutputFile(#[source] std::io::Error, String),
     #[error("Failed to emit output object to buffer")]
@@ -27,6 +25,9 @@ enum Error {
     WriteBuffer(#[source] std::io::Error),
     #[error("Failed to write output object to disk")]
     FlushBufferedWriter(#[source] std::io::Error),
+
+    #[error(transparent)]
+    Thorin(#[from] thorin::Error),
 }
 
 #[derive(Debug, StructOpt)]
@@ -142,12 +143,29 @@ fn main() -> Result<(), Error> {
     trace!(?opt);
 
     let sess = Session::default();
-    let obj = thorin::package(&sess, opt.inputs, opt.executables).map_err(Error::Packaging)?;
+    let mut package = thorin::DwarfPackage::new(&sess);
+
+    for input in opt.inputs {
+        package.add_input_object(&input).map_err(Error::Thorin)?;
+    }
+
+    if let Some(executables) = opt.executables {
+        for executable in executables {
+            // Failing to read the referenced object might be expected if the path referenced by
+            // the executable isn't found but the referenced DWARF object is later found as an
+            // input - calling `finish` will return an error in this case.
+            package.add_executable(&executable, thorin::MissingReferencedObjectBehaviour::Skip)?;
+        }
+    }
 
     let output_stream = Output::new(opt.output.as_ref())
         .map_err(|e| Error::CreateOutputFile(e, opt.output.display().to_string()))?;
     let mut output_stream = StreamingBuffer::new(BufWriter::new(output_stream));
-    obj.emit(&mut output_stream).map_err(Error::EmitOutputObject)?;
+    package
+        .finish()
+        .map_err(Error::Thorin)?
+        .emit(&mut output_stream)
+        .map_err(Error::EmitOutputObject)?;
     output_stream.result().map_err(Error::WriteBuffer)?;
     output_stream.into_inner().flush().map_err(Error::FlushBufferedWriter)
 }
