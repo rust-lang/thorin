@@ -463,7 +463,9 @@ name = "thorin-bin"
 version = "0.1.0"
 dependencies = [
  "memmap2",
+ "object",
  "structopt",
+ "thiserror",
  "thorin",
  "tracing",
  "tracing-subscriber",

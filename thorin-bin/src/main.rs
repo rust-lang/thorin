@@ -1,13 +1,33 @@
 use memmap2::Mmap;
+use object::write::StreamingBuffer;
 use std::borrow::Borrow;
-use std::fs::File;
+use std::ffi::OsStr;
+use std::fs::{File, OpenOptions};
 use std::path::Path;
-use std::{io::stderr, path::PathBuf};
+use std::{
+    io::{self, BufWriter, Write},
+    path::PathBuf,
+};
 use structopt::StructOpt;
+use thiserror::Error;
 use tracing::trace;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
 use tracing_tree::HierarchicalLayer;
 use typed_arena::Arena;
+
+#[derive(Debug, Error)]
+enum ThorinBinError {
+    #[error("Failed to create DWARF package")]
+    Packaging(#[source] thorin::DwpError),
+    #[error("Failed to create output object `{1}`")]
+    CreateOutputFile(#[source] std::io::Error, String),
+    #[error("Failed to emit output object to buffer")]
+    EmitOutputObject(#[source] object::write::Error),
+    #[error("Failed to write output object to buffer")]
+    WriteBuffer(#[source] std::io::Error),
+    #[error("Failed to write output object to disk")]
+    FlushBufferedWriter(#[source] std::io::Error),
+}
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "thorin", about = "merge dwarf objects into dwarf packages")]
@@ -53,10 +73,65 @@ impl<Relocations> thorin::Session<Relocations> for Session<Relocations> {
     }
 }
 
-fn main() -> Result<(), thorin::DwpError> {
+/// Returns `true` if the file type is a fifo.
+#[cfg(not(target_family = "unix"))]
+fn is_fifo(_: std::fs::FileType) -> bool {
+    false
+}
+
+/// Returns `true` if the file type is a fifo.
+#[cfg(target_family = "unix")]
+fn is_fifo(file_type: std::fs::FileType) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    file_type.is_fifo()
+}
+
+/// Wrapper around output writer which handles differences between stdout, file and pipe outputs.
+pub(crate) enum Output {
+    Stdout(io::Stdout),
+    File(File),
+    Pipe(File),
+}
+
+impl Output {
+    /// Create a `Output` from the input path (or "-" for stdout).
+    pub(crate) fn new(path: &OsStr) -> io::Result<Self> {
+        if path == "-" {
+            return Ok(Output::Stdout(io::stdout()));
+        }
+
+        let file =
+            OpenOptions::new().read(true).write(true).create(true).truncate(true).open(path)?;
+        if is_fifo(file.metadata()?.file_type()) {
+            Ok(Output::File(file))
+        } else {
+            Ok(Output::Pipe(file))
+        }
+    }
+}
+
+impl io::Write for Output {
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Output::Stdout(stdout) => stdout.flush(),
+            Output::Pipe(pipe) => pipe.flush(),
+            Output::File(file) => file.flush(),
+        }
+    }
+
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Output::Stdout(stdout) => stdout.write(buf),
+            Output::Pipe(pipe) => pipe.write(buf),
+            Output::File(file) => file.write(buf),
+        }
+    }
+}
+
+fn main() -> Result<(), ThorinBinError> {
     let subscriber = Registry::default().with(EnvFilter::from_env("RUST_DWP_LOG")).with(
         HierarchicalLayer::default()
-            .with_writer(stderr)
+            .with_writer(io::stderr)
             .with_indent_lines(true)
             .with_targets(true)
             .with_indent_amount(2),
@@ -67,5 +142,13 @@ fn main() -> Result<(), thorin::DwpError> {
     trace!(?opt);
 
     let sess = Session::default();
-    thorin::package(&sess, opt.inputs, opt.executables, opt.output)
+    let obj =
+        thorin::package(&sess, opt.inputs, opt.executables).map_err(ThorinBinError::Packaging)?;
+
+    let output_stream = Output::new(opt.output.as_ref())
+        .map_err(|e| ThorinBinError::CreateOutputFile(e, opt.output.display().to_string()))?;
+    let mut output_stream = StreamingBuffer::new(BufWriter::new(output_stream));
+    obj.emit(&mut output_stream).map_err(ThorinBinError::EmitOutputObject)?;
+    output_stream.result().map_err(ThorinBinError::WriteBuffer)?;
+    output_stream.into_inner().flush().map_err(ThorinBinError::FlushBufferedWriter)
 }

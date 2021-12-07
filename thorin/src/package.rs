@@ -703,7 +703,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
         Ok(())
     }
 
-    pub(crate) fn emit(mut self, buffer: &mut dyn object::write::WritableBuffer) -> Result<()> {
+    pub(crate) fn finish(mut self) -> Result<WritableObject<'file>> {
         // Write `.debug_str` to the object.
         let _ = self.string_table.write(&mut self.debug_str, &mut self.obj);
 
@@ -717,8 +717,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
             .write_index(self.endian, self.format, &mut self.obj, &mut self.debug_tu_index)
             .map_err(DwpError::WriteTuIndex)?;
 
-        // Write the contents of the entire object to the buffer.
-        self.obj.emit(buffer).map_err(From::from)
+        Ok(self.obj)
     }
 }
 
