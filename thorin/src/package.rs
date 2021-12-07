@@ -70,7 +70,7 @@ impl Default for PackageFormat {
 /// New-type'd index (constructed from `gimli::DwoId`) with a custom `Debug` implementation to
 /// print in hexadecimal.
 #[derive(Copy, Clone, Eq, Hash, PartialEq)]
-pub struct DwoId(pub(crate) u64);
+pub(crate) struct DwoId(pub(crate) u64);
 
 impl Bucketable for DwoId {
     fn index(&self) -> u64 {
@@ -93,7 +93,7 @@ impl From<gimli::DwoId> for DwoId {
 /// New-type'd index (constructed from `gimli::DebugTypeSignature`) with a custom `Debug`
 /// implementation to print in hexadecimal.
 #[derive(Copy, Clone, Eq, Hash, PartialEq)]
-pub struct DebugTypeSignature(pub(crate) u64);
+pub(crate) struct DebugTypeSignature(pub(crate) u64);
 
 impl Bucketable for DebugTypeSignature {
     fn index(&self) -> u64 {
@@ -115,7 +115,7 @@ impl From<gimli::DebugTypeSignature> for DebugTypeSignature {
 
 /// Identifier for a DWARF object.
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
-pub enum DwarfObjectIdentifier {
+pub(crate) enum DwarfObjectIdentifier {
     /// `DwoId` identifying compilation units.
     Compilation(DwoId),
     /// `DebugTypeSignature` identifying type units.
@@ -132,14 +132,14 @@ impl Bucketable for DwarfObjectIdentifier {
 }
 
 /// In-progress DWARF package being produced.
-pub(crate) struct OutputPackage<'file, Endian: gimli::Endianity> {
+pub(crate) struct InProgressDwarfPackage<'file> {
     /// Object file being created.
     obj: WritableObject<'file>,
 
     /// Format of the DWARF package being created.
     format: PackageFormat,
     /// Endianness of the DWARF package being created.
-    endian: Endian,
+    endian: RunTimeEndian,
 
     /// Identifier for the `.debug_cu_index.dwo` section in the object file being created. Format
     /// depends on whether this is a GNU extension-flavoured package or DWARF 5-flavoured package.
@@ -208,7 +208,7 @@ pub(crate) struct OutputPackage<'file, Endian: gimli::Endianity> {
 
     /// In-progress string table being accumulated. Used to write final `.debug_str.dwo` and
     /// `.debug_str_offsets.dwo` for each DWARF object.
-    string_table: DwpStringTable<Endian>,
+    string_table: DwpStringTable<RunTimeEndian>,
 
     /// `DebugTypeSignature`s of type units and `DwoId`s of compilation units that have already
     /// been added to the output package.
@@ -216,10 +216,10 @@ pub(crate) struct OutputPackage<'file, Endian: gimli::Endianity> {
     /// Used when adding new TU index entries to de-duplicate type units (as required by the
     /// specification). Also used to check that all dwarf objects referenced by executables
     /// have been found.
-    seen_units: HashSet<DwarfObjectIdentifier>,
+    contained_units: HashSet<DwarfObjectIdentifier>,
 }
 
-impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
+impl<'file> InProgressDwarfPackage<'file> {
     /// Create an object file with empty sections that will be later populated from DWARF object
     /// files.
     #[tracing::instrument(level = "trace")]
@@ -227,13 +227,13 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
         format: PackageFormat,
         architecture: object::Architecture,
         endianness: object::Endianness,
-    ) -> OutputPackage<'file, RunTimeEndian> {
+    ) -> InProgressDwarfPackage<'file> {
         let obj = WritableObject::new(BinaryFormat::Elf, architecture, endianness);
 
         let endian = runtime_endian_from_endianness(endianness);
         let string_table = DwpStringTable::new(endian);
 
-        OutputPackage {
+        Self {
             obj,
             format,
             endian,
@@ -253,8 +253,13 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
             debug_macro: Default::default(),
             cu_index_entries: Default::default(),
             tu_index_entries: Default::default(),
-            seen_units: Default::default(),
+            contained_units: Default::default(),
         }
+    }
+
+    /// Returns the units contained within this in-progress DWARF package.
+    pub(crate) fn contained_units(&self) -> &HashSet<DwarfObjectIdentifier> {
+        &self.contained_units
     }
 
     /// Return the `SectionId` corresponding to a `gimli::SectionId`, creating a id if it hasn't
@@ -434,7 +439,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                 Some(DwarfObjectIdentifier::Compilation(dwo_id)),
             ) => {
                 debug!(?dwo_id, "compilation unit");
-                if self.seen_units.contains(&DwarfObjectIdentifier::Compilation(dwo_id)) {
+                if self.contained_units.contains(&DwarfObjectIdentifier::Compilation(dwo_id)) {
                     // Return early if a unit with this type signature has already been seen.
                     debug!(?dwo_id, "skipping, already seen");
                     return Ok(());
@@ -454,7 +459,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                     let offset = self.obj.append_section_data(id, data, section.align());
                     let contribution = Contribution { offset: ContributionOffset(offset), size };
                     append_cu_contribution(self, dwo_id, contribution)?;
-                    self.seen_units.insert(DwarfObjectIdentifier::Compilation(dwo_id));
+                    self.contained_units.insert(DwarfObjectIdentifier::Compilation(dwo_id));
                 }
 
                 Ok(())
@@ -464,7 +469,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                 Some(DwarfObjectIdentifier::Type(type_signature)),
             ) => {
                 debug!(?type_signature, "type unit");
-                if self.seen_units.contains(&DwarfObjectIdentifier::Type(type_signature)) {
+                if self.contained_units.contains(&DwarfObjectIdentifier::Type(type_signature)) {
                     // Return early if a unit with this type signature has already been seen.
                     debug!(?type_signature, "skipping, already seen");
                     return Ok(());
@@ -499,7 +504,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                     let offset = self.obj.append_section_data(id, data, section.align());
                     let contribution = Contribution { offset: ContributionOffset(offset), size };
                     append_tu_contribution(self, type_signature, contribution)?;
-                    self.seen_units.insert(DwarfObjectIdentifier::Type(type_signature));
+                    self.contained_units.insert(DwarfObjectIdentifier::Type(type_signature));
                 }
 
                 Ok(())
@@ -695,15 +700,6 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
         Ok(())
     }
 
-    pub(crate) fn verify(&self, targets: &HashSet<DwarfObjectIdentifier>) -> Result<()> {
-        if targets.difference(&self.seen_units).count() != 0 {
-            let missing = targets.difference(&self.seen_units).cloned().collect();
-            return Err(Error::MissingReferencedUnit(missing));
-        }
-
-        Ok(())
-    }
-
     pub(crate) fn finish(mut self) -> Result<WritableObject<'file>> {
         // Write `.debug_str` to the object.
         let _ = self.string_table.write(&mut self.debug_str, &mut self.obj);
@@ -722,8 +718,8 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
     }
 }
 
-impl<'file, Endian: gimli::Endianity> fmt::Debug for OutputPackage<'file, Endian> {
+impl<'file> fmt::Debug for InProgressDwarfPackage<'file> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "OutputPackage({})", self.format)
+        write!(f, "InProgressDwarfPackage({})", self.format)
     }
 }

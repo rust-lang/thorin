@@ -1,22 +1,15 @@
-use std::{
-    borrow::Cow,
-    collections::HashSet,
-    path::{Path, PathBuf},
-};
-
 use gimli::{EndianSlice, RunTimeEndian, UnitIndex, UnitType};
 use object::{
     write::{Object as WritableObject, SectionId},
     Endianness, Object, ObjectSection, SectionKind,
 };
-use tracing::debug;
 
 use crate::{
     error::{Error, Result},
     index::{Bucketable, Contribution, ContributionOffset},
     marker::HasGimliId,
-    package::{DwarfObjectIdentifier, PackageFormat},
-    relocate::{add_relocations, DwpReader, Relocate, RelocationMap},
+    package::DwarfObjectIdentifier,
+    relocate::RelocationMap,
     Session,
 };
 
@@ -272,132 +265,4 @@ pub(crate) fn dwo_identifier_of_unit<R: gimli::Reader>(
         // Wrong compilation unit type.
         _ => None,
     }
-}
-
-/// Returns the `TargetDwarfObject` of a compilation/type unit.
-///
-/// In DWARF 5, skeleton compilation unit will contain a `DW_AT_dwo_name` attribute with the name
-/// of the dwarf object file containing the split compilation unit with the `DwoId`. In earlier
-/// DWARF versions with GNU extension, `DW_AT_GNU_dwo_name` attribute contains a name.
-#[tracing::instrument(level = "trace", skip(dwarf, unit))]
-pub(crate) fn dwo_id_and_path_of_unit<R: gimli::Reader>(
-    dwarf: &gimli::Dwarf<R>,
-    unit: &gimli::Unit<R>,
-) -> Result<Option<(DwarfObjectIdentifier, PathBuf)>> {
-    let identifier = if let Some(identifier) = dwo_identifier_of_unit(unit) {
-        identifier
-    } else {
-        return Ok(None);
-    };
-
-    let dwo_name = {
-        let mut cursor = unit.header.entries(&unit.abbreviations);
-        cursor.next_dfs()?;
-        let root = cursor.current().expect("unit without root debugging information entry");
-
-        let dwo_name = if let Some(val) = root.attr_value(gimli::DW_AT_dwo_name)? {
-            // DWARF 5
-            val
-        } else if let Some(val) = root.attr_value(gimli::DW_AT_GNU_dwo_name)? {
-            // GNU Extension
-            val
-        } else {
-            return Err(Error::MissingDwoName(identifier.index()));
-        };
-
-        dwarf.attr_string(&unit, dwo_name)?.to_string()?.into_owned()
-    };
-
-    // Prepend the compilation directory if it exists.
-    let mut path = if let Some(comp_dir) = &unit.comp_dir {
-        PathBuf::from(comp_dir.to_string()?.into_owned())
-    } else {
-        PathBuf::new()
-    };
-    path.push(dwo_name);
-
-    Ok(Some((identifier, path)))
-}
-
-/// Load and parse an object file.
-#[tracing::instrument(level = "trace", skip(sess))]
-pub(crate) fn load_object_file<'input, 'session: 'input>(
-    sess: &'session impl Session<RelocationMap>,
-    path: &'input Path,
-) -> Result<object::File<'session>> {
-    let data = sess.read_input(path).map_err(Error::ReadInput)?;
-    object::File::parse(data).map_err(|e| Error::ParseObjectFile(e, path.display().to_string()))
-}
-
-/// Loads a section of a file from `object::File` into a `gimli::EndianSlice`. Expected to be
-/// curried using a closure and provided to `Dwarf::load`.
-#[tracing::instrument(level = "trace", skip(sess, obj))]
-pub(crate) fn load_file_section<'input, 'session: 'input>(
-    sess: &'session impl Session<RelocationMap>,
-    id: gimli::SectionId,
-    obj: &object::File<'input>,
-    is_dwo: bool,
-) -> Result<DwpReader<'input>> {
-    let mut relocations = RelocationMap::default();
-    let name = if is_dwo { id.dwo_name() } else { Some(id.name()) };
-
-    let data = match name.and_then(|name| obj.section_by_name(&name)) {
-        Some(ref section) => {
-            if !is_dwo {
-                add_relocations(&mut relocations, obj, section)?;
-            }
-            section.compressed_data()?.decompress()?
-        }
-        // Use a non-zero capacity so that `ReaderOffsetId`s are unique.
-        None => Cow::Owned(Vec::with_capacity(1)),
-    };
-
-    let data_ref = sess.alloc_owned_cow(data);
-    let reader =
-        gimli::EndianSlice::new(data_ref, runtime_endian_from_endianness(obj.endianness()));
-    let section = reader;
-    let relocations = sess.alloc_relocation(relocations);
-    Ok(Relocate { relocations, section, reader })
-}
-
-/// Parse the executable, collect split unit identifiers to be found in input DWARF objects and add
-/// new input DWARF objects.
-#[tracing::instrument(level = "trace", skip(sess, obj))]
-pub(crate) fn parse_executable<'input, 'session: 'input>(
-    sess: &'session impl Session<RelocationMap>,
-    obj: &object::File<'input>,
-    target_dwarf_objects: &mut HashSet<DwarfObjectIdentifier>,
-    dwarf_object_paths: &mut Vec<PathBuf>,
-) -> Result<Option<(PackageFormat, object::Architecture, object::Endianness)>> {
-    let mut load_section =
-        |id: gimli::SectionId| -> Result<_> { load_file_section(sess, id, &obj, false) };
-
-    let dwarf = gimli::Dwarf::load(&mut load_section)?;
-
-    let format = if let Some(root_header) = dwarf.units().next().map_err(Error::ParseUnitHeader)? {
-        PackageFormat::from_dwarf_version(root_header.version())
-    } else {
-        return Ok(None);
-    };
-    debug!(?format);
-
-    let mut iter = dwarf.units();
-    while let Some(header) = iter.next().map_err(Error::ParseUnitHeader)? {
-        let unit = dwarf.unit(header).map_err(Error::ParseUnit)?;
-        if let Some((target, path)) = dwo_id_and_path_of_unit(&dwarf, &unit)? {
-            // Only add `DwoId`s to the target vector, not `DebugTypeSignature`s. There doesn't
-            // appear to be a "skeleton type unit" to find the corresponding unit of (there are
-            // normal type units in an executable, but should we expect to find a corresponding
-            // split type unit for those?).
-            if matches!(target, DwarfObjectIdentifier::Compilation(_)) {
-                debug!(?target, "adding target");
-                target_dwarf_objects.insert(target);
-            }
-
-            debug!(?path, "adding path");
-            dwarf_object_paths.push(path);
-        }
-    }
-
-    Ok(Some((format, obj.architecture(), obj.endianness())))
 }

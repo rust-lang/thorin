@@ -1,18 +1,22 @@
 use std::{
     borrow::Cow,
     collections::HashSet,
+    fmt,
     path::{Path, PathBuf},
 };
 
-use gimli::RunTimeEndian;
-use object::{Architecture, Endianness, FileKind, Object};
+use gimli::{EndianSlice, Reader};
+use object::{
+    write::Object as WritableObject, Architecture, Endianness, FileKind, Object, ObjectSection,
+};
 use tracing::{debug, trace};
 
 use crate::{
-    error::{Error, Result},
-    package::{OutputPackage, PackageFormat},
-    relocate::RelocationMap,
-    util::{load_file_section, load_object_file, parse_executable},
+    error::Result,
+    index::Bucketable,
+    package::{DwarfObjectIdentifier, InProgressDwarfPackage, PackageFormat},
+    relocate::{add_relocations, DwpReader, Relocate, RelocationMap},
+    util::{dwo_identifier_of_unit, runtime_endian_from_endianness},
 };
 
 mod error;
@@ -22,6 +26,8 @@ mod package;
 mod relocate;
 mod strings;
 mod util;
+
+pub use crate::error::Error;
 
 /// `Session` is expected to be implemented by users of `thorin`, allowing users of `thorin` to
 /// decide how to manage data, rather than `thorin` having arenas internally.
@@ -51,143 +57,260 @@ pub trait Session<Relocations> {
     fn read_input<'session>(&'session self, path: &Path) -> std::io::Result<&'session [u8]>;
 }
 
-/// Process an input file - adding it to an output package.
-///
-/// Will use the package format, architecture and endianness from the file to create the output
-/// package if it does not already exist (and may use the provided format, architecture and
-/// endianness).
-#[tracing::instrument(level = "trace", skip(sess, obj, output))]
-fn process_input_file<'input, 'session: 'input>(
+/// Loads a section of a file from `object::File` into a `gimli::EndianSlice`. Expected to be
+/// curried using a closure and provided to `Dwarf::load`.
+#[tracing::instrument(level = "trace", skip(sess, obj))]
+fn load_file_section<'input, 'session: 'input>(
     sess: &'session impl Session<RelocationMap>,
-    path: &str,
-    obj: &'input object::File<'input>,
-    output_object_inputs: &mut Option<(PackageFormat, Architecture, Endianness)>,
-    output: &mut Option<OutputPackage<'_, RunTimeEndian>>,
-) -> Result<()> {
-    let mut load_dwo_section =
-        |id: gimli::SectionId| -> Result<_> { load_file_section(sess, id, &obj, true) };
+    id: gimli::SectionId,
+    obj: &object::File<'input>,
+    is_dwo: bool,
+) -> Result<DwpReader<'input>> {
+    let mut relocations = RelocationMap::default();
+    let name = if is_dwo { id.dwo_name() } else { Some(id.name()) };
 
-    let dwarf = gimli::Dwarf::load(&mut load_dwo_section)?;
-    let root_header = match dwarf.units().next().map_err(Error::ParseUnitHeader)? {
-        Some(header) => header,
-        None => {
-            debug!("input dwarf object has no units, skipping");
-            return Ok(());
+    let data = match name.and_then(|name| obj.section_by_name(&name)) {
+        Some(ref section) => {
+            if !is_dwo {
+                add_relocations(&mut relocations, obj, section)?;
+            }
+            section.compressed_data()?.decompress()?
         }
+        // Use a non-zero capacity so that `ReaderOffsetId`s are unique.
+        None => Cow::Owned(Vec::with_capacity(1)),
     };
-    let format = PackageFormat::from_dwarf_version(root_header.version());
 
-    if output.is_none() {
-        let (format, architecture, endianness) = match *output_object_inputs {
-            Some(inpts) => inpts,
-            None => (format, obj.architecture(), obj.endianness()),
-        };
-
-        *output = Some(OutputPackage::<RunTimeEndian>::new(format, architecture, endianness));
-    }
-
-    if let Some(output) = output {
-        output.append_dwarf_object(sess, obj, &dwarf, root_header.encoding(), format)?;
-    }
-
-    Ok(())
+    let data_ref = sess.alloc_owned_cow(data);
+    let reader = EndianSlice::new(data_ref, runtime_endian_from_endianness(obj.endianness()));
+    let section = reader;
+    let relocations = sess.alloc_relocation(relocations);
+    Ok(Relocate { relocations, section, reader })
 }
 
-/// Create a DWARF package from the files in `inputs`, ensuring that all DWARF objects referenced
-/// by `executables` are found, writing the final DWARF package to `output_path`.
-pub fn package<'session>(
-    sess: &'session impl Session<RelocationMap>,
-    inputs: Vec<PathBuf>,
-    executables: Option<Vec<PathBuf>>,
-) -> Result<object::write::Object> {
-    let mut output_object_inputs = None;
+/// Should missing DWARF objects referenced by executables be skipped or result in an error?
+///
+/// Referenced objects that are still missing when the DWARF package is finished will result in
+/// an error.
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+pub enum MissingReferencedObjectBehaviour {
+    /// Skip missing referenced DWARF objects - useful if this is expected, i.e. the path in the
+    /// executable is wrong, but the referenced object will be found because it is an input.
+    Skip,
+    /// Error when encountering missing referenced DWARF objects.
+    Error,
+}
 
-    // Paths to DWARF objects to open (from positional arguments or referenced by executables).
-    let mut dwarf_object_paths = inputs;
-    // `DwoId`s or `DebugTypeSignature`s referenced by any executables that have been opened,
-    // must find.
-    let mut target_dwarf_objects = HashSet::new();
-
-    if let Some(executables) = executables {
-        for executable in executables {
-            let obj = load_object_file(sess, &executable)?;
-            let found_output_object_inputs =
-                parse_executable(sess, &obj, &mut target_dwarf_objects, &mut dwarf_object_paths)?;
-
-            output_object_inputs = output_object_inputs.or(found_output_object_inputs);
+impl MissingReferencedObjectBehaviour {
+    /// Should missing referenced objects be skipped?
+    pub fn skip_missing(&self) -> bool {
+        match *self {
+            MissingReferencedObjectBehaviour::Skip => true,
+            MissingReferencedObjectBehaviour::Error => false,
         }
     }
+}
 
-    // Need to know the package format, architecture and endianness to create the output object.
-    // Retrieve these from the input files - either the executable or the dwarf objects - so delay
-    // creation until these inputs are definitely available.
-    let mut output = None;
+/// Builder for DWARF packages, add input objects/packages with `add_input_object` or input objects
+/// referenced by an executable with `add_executable` before accessing the completed object with
+/// `finish`.
+pub struct DwarfPackage<'output, 'session: 'output, Sess: Session<RelocationMap>> {
+    sess: &'session Sess,
+    maybe_in_progress: Option<InProgressDwarfPackage<'output>>,
+    targets: HashSet<DwarfObjectIdentifier>,
+}
 
-    for path in &dwarf_object_paths {
-        let data = match sess.read_input(&path) {
-            Ok(data) => data,
-            Err(e) => {
-                debug!(
-                    ?path,
-                    "could not open, may fail if this file contains units referenced by \
-                     executable that are not otherwise found.",
-                );
-                trace!(?e);
-                continue;
+impl<'output, 'session: 'output, Sess> fmt::Debug for DwarfPackage<'output, 'session, Sess>
+where
+    Sess: Session<RelocationMap>,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DwarfPackage")
+            .field("in_progress", &self.maybe_in_progress)
+            .field("target_count", &self.targets.len())
+            .finish()
+    }
+}
+
+impl<'output, 'session: 'output, Sess> DwarfPackage<'output, 'session, Sess>
+where
+    Sess: Session<RelocationMap>,
+{
+    /// Create a new `DwarfPackage` with the provided `Session` implementation.
+    pub fn new(sess: &'session Sess) -> Self {
+        Self { sess, maybe_in_progress: None, targets: HashSet::new() }
+    }
+
+    /// Creating a `InProgressDwarfPackage` requires knowing the format of the package being
+    /// created, its architecture and its endianness - these aren't known when a `DwarfPackage` is
+    /// created, so use this function to access the package, creating it if it hasn't been created
+    /// yet.
+    fn in_progress_package(
+        &mut self,
+        format: PackageFormat,
+        architecture: Architecture,
+        endianness: Endianness,
+    ) -> &mut InProgressDwarfPackage<'output> {
+        if self.maybe_in_progress.is_none() {
+            self.maybe_in_progress =
+                Some(InProgressDwarfPackage::new(format, architecture, endianness));
+        }
+
+        // EXPECT: in-progress package already exists or was just created
+        self.maybe_in_progress.as_mut().expect("`DwarfPackage::package` is broken")
+    }
+
+    /// Add an input object to the in-progress package.
+    #[tracing::instrument(level = "trace", skip(obj))]
+    fn process_input_object<'input>(&mut self, obj: &'input object::File<'input>) -> Result<()> {
+        let mut load_dwo_section =
+            |id: gimli::SectionId| -> Result<_> { load_file_section(self.sess, id, &obj, true) };
+
+        let dwarf = gimli::Dwarf::load(&mut load_dwo_section)?;
+        let root_header = match dwarf.units().next().map_err(Error::ParseUnitHeader)? {
+            Some(header) => header,
+            None => {
+                debug!("input dwarf object has no units, skipping");
+                return Ok(());
             }
         };
+        let format = PackageFormat::from_dwarf_version(root_header.version());
 
-        match FileKind::parse(data).map_err(Error::ParseFileKind)? {
+        let sess = self.sess;
+        self.in_progress_package(format, obj.architecture(), obj.endianness()).append_dwarf_object(
+            sess,
+            obj,
+            &dwarf,
+            root_header.encoding(),
+            format,
+        )
+    }
+
+    /// Add input objects referenced by executable to the DWARF package.
+    #[tracing::instrument(level = "trace")]
+    pub fn add_executable(
+        &mut self,
+        path: &Path,
+        missing_behaviour: MissingReferencedObjectBehaviour,
+    ) -> Result<()> {
+        let data = self.sess.read_input(path).map_err(Error::ReadInput)?;
+        let obj = object::File::parse(data).map_err(Error::ParseObjectFile)?;
+
+        let mut load_section =
+            |id: gimli::SectionId| -> Result<_> { load_file_section(self.sess, id, &obj, false) };
+
+        let dwarf = gimli::Dwarf::load(&mut load_section)?;
+
+        let mut iter = dwarf.units();
+        while let Some(header) = iter.next().map_err(Error::ParseUnitHeader)? {
+            let unit = dwarf.unit(header).map_err(Error::ParseUnit)?;
+
+            let target = match dwo_identifier_of_unit(&unit) {
+                Some(target) => target,
+                None => continue,
+            };
+
+            let dwo_name = {
+                let mut cursor = unit.header.entries(&unit.abbreviations);
+                cursor.next_dfs()?;
+                let root = cursor.current().expect("unit without root debugging information entry");
+
+                let dwo_name = if let Some(val) = root.attr_value(gimli::DW_AT_dwo_name)? {
+                    // DWARF 5
+                    val
+                } else if let Some(val) = root.attr_value(gimli::DW_AT_GNU_dwo_name)? {
+                    // GNU Extension
+                    val
+                } else {
+                    return Err(Error::MissingDwoName(target.index()));
+                };
+
+                dwarf.attr_string(&unit, dwo_name)?.to_string()?.into_owned()
+            };
+
+            // Prepend the compilation directory if it exists.
+            let mut path = if let Some(comp_dir) = &unit.comp_dir {
+                PathBuf::from(comp_dir.to_string()?.into_owned())
+            } else {
+                PathBuf::new()
+            };
+            path.push(dwo_name);
+
+            // Only add `DwoId`s to the targets, not `DebugTypeSignature`s. There doesn't
+            // appear to be a "skeleton type unit" to find the corresponding unit of (there are
+            // normal type units in an executable, but should we expect to find a corresponding
+            // split type unit for those?).
+            if matches!(target, DwarfObjectIdentifier::Compilation(_)) {
+                debug!(?target, "adding target");
+                self.targets.insert(target);
+            }
+
+            match self.add_input_object(&path) {
+                Ok(()) => (),
+                Err(Error::ReadInput(..)) if missing_behaviour.skip_missing() => (),
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Add an input object to the DWARF package.
+    ///
+    /// Input object must be an archive or an elf object.
+    #[tracing::instrument(level = "trace")]
+    pub fn add_input_object(&mut self, path: &Path) -> Result<()> {
+        let data = self.sess.read_input(&path).map_err(Error::ReadInput)?;
+
+        let kind = FileKind::parse(data).map_err(Error::ParseFileKind)?;
+        trace!(?kind);
+        match kind {
             FileKind::Archive => {
                 let archive = object::read::archive::ArchiveFile::parse(data)
-                    .map_err(|e| Error::ParseArchiveFile(e, path.display().to_string()))?;
+                    .map_err(Error::ParseArchiveFile)?;
 
                 for member in archive.members() {
                     let member = member.map_err(Error::ParseArchiveMember)?;
                     let data = member.data(data)?;
-                    if matches!(
-                        FileKind::parse(data).map_err(Error::ParseFileKind)?,
-                        FileKind::Elf32 | FileKind::Elf64
-                    ) {
-                        let name = path.display().to_string()
-                            + ":"
-                            + &String::from_utf8_lossy(member.name());
-                        let obj = object::File::parse(data)
-                            .map_err(|e| Error::ParseObjectFile(e, name.clone()))?;
-                        process_input_file(
-                            sess,
-                            &name,
-                            &obj,
-                            &mut output_object_inputs,
-                            &mut output,
-                        )?;
-                    } else {
-                        debug!("skipping non-elf file in archive input");
+
+                    let kind = FileKind::parse(data).map_err(Error::ParseFileKind)?;
+                    trace!(?kind, "archive member");
+                    match kind {
+                        FileKind::Elf32 | FileKind::Elf64 => {
+                            let obj = object::File::parse(data).map_err(Error::ParseObjectFile)?;
+                            self.process_input_object(&obj)?;
+                        }
+                        _ => {
+                            trace!("skipping non-elf archive member");
+                        }
                     }
                 }
+
+                Ok(())
             }
             FileKind::Elf32 | FileKind::Elf64 => {
-                let obj = object::File::parse(data)
-                    .map_err(|e| Error::ParseObjectFile(e, path.display().to_string()))?;
-                process_input_file(
-                    sess,
-                    &path.to_string_lossy(),
-                    &obj,
-                    &mut output_object_inputs,
-                    &mut output,
-                )?;
+                let obj = object::File::parse(data).map_err(Error::ParseObjectFile)?;
+                self.process_input_object(&obj)
             }
-            _ => {
-                debug!(?path, "input file is not an archive or elf object, skipping...",);
-            }
+            _ => Err(Error::InvalidInputKind),
         }
     }
 
-    match output {
-        Some(output) => {
-            output.verify(&target_dwarf_objects)?;
-            output.finish()
+    /// Returns the `object::write::Object` containing the created DWARF package.
+    ///
+    /// Returns an `Error::MissingReferencedUnit` if DWARF objects referenced by executables were
+    /// not subsequently found.
+    /// Returns an `Error::NoOutputObjectCreated` if no input objects or executables were provided.
+    #[tracing::instrument(level = "trace")]
+    pub fn finish(self) -> Result<WritableObject<'output>> {
+        match self.maybe_in_progress {
+            Some(package) => {
+                if let Some(missing) = self.targets.difference(package.contained_units()).next() {
+                    return Err(Error::MissingReferencedUnit(missing.index()));
+                }
+
+                package.finish()
+            }
+            None => Err(Error::NoOutputObjectCreated),
         }
-        None => Err(Error::NoOutputObjectCreated),
     }
 }
