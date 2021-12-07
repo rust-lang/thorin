@@ -9,7 +9,7 @@ use object::{Architecture, Endianness, FileKind, Object};
 use tracing::{debug, trace};
 
 use crate::{
-    error::{DwpError, Result},
+    error::{Error, Result},
     package::{OutputPackage, PackageFormat},
     relocate::RelocationMap,
     util::{load_file_section, load_object_file, parse_executable},
@@ -68,7 +68,7 @@ fn process_input_file<'input, 'session: 'input>(
         |id: gimli::SectionId| -> Result<_> { load_file_section(sess, id, &obj, true) };
 
     let dwarf = gimli::Dwarf::load(&mut load_dwo_section)?;
-    let root_header = match dwarf.units().next().map_err(DwpError::ParseUnitHeader)? {
+    let root_header = match dwarf.units().next().map_err(Error::ParseUnitHeader)? {
         Some(header) => header,
         None => {
             debug!("input dwarf object has no units, skipping");
@@ -137,23 +137,23 @@ pub fn package<'session>(
             }
         };
 
-        match FileKind::parse(data).map_err(DwpError::ParseFileKind)? {
+        match FileKind::parse(data).map_err(Error::ParseFileKind)? {
             FileKind::Archive => {
                 let archive = object::read::archive::ArchiveFile::parse(data)
-                    .map_err(|e| DwpError::ParseArchiveFile(e, path.display().to_string()))?;
+                    .map_err(|e| Error::ParseArchiveFile(e, path.display().to_string()))?;
 
                 for member in archive.members() {
-                    let member = member.map_err(DwpError::ParseArchiveMember)?;
+                    let member = member.map_err(Error::ParseArchiveMember)?;
                     let data = member.data(data)?;
                     if matches!(
-                        FileKind::parse(data).map_err(DwpError::ParseFileKind)?,
+                        FileKind::parse(data).map_err(Error::ParseFileKind)?,
                         FileKind::Elf32 | FileKind::Elf64
                     ) {
                         let name = path.display().to_string()
                             + ":"
                             + &String::from_utf8_lossy(member.name());
                         let obj = object::File::parse(data)
-                            .map_err(|e| DwpError::ParseObjectFile(e, name.clone()))?;
+                            .map_err(|e| Error::ParseObjectFile(e, name.clone()))?;
                         process_input_file(
                             sess,
                             &name,
@@ -168,7 +168,7 @@ pub fn package<'session>(
             }
             FileKind::Elf32 | FileKind::Elf64 => {
                 let obj = object::File::parse(data)
-                    .map_err(|e| DwpError::ParseObjectFile(e, path.display().to_string()))?;
+                    .map_err(|e| Error::ParseObjectFile(e, path.display().to_string()))?;
                 process_input_file(
                     sess,
                     &path.to_string_lossy(),
@@ -188,6 +188,6 @@ pub fn package<'session>(
             output.verify(&target_dwarf_objects)?;
             output.finish()
         }
-        None => Err(DwpError::NoOutputObjectCreated),
+        None => Err(Error::NoOutputObjectCreated),
     }
 }

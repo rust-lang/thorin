@@ -2,11 +2,11 @@ use thiserror::Error;
 
 use crate::package::DwarfObjectIdentifier;
 
-pub(crate) type Result<T> = std::result::Result<T, DwpError>;
+pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 /// Diagnostics (and contexts) emitted during DWARF packaging.
 #[derive(Debug, Error)]
-pub enum DwpError {
+pub enum Error {
     #[error("Failed to read input file")]
     ReadInput(#[source] std::io::Error),
     #[error("Failed to parse kind of input file")]

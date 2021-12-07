@@ -7,7 +7,7 @@ use std::{borrow::Cow, collections::HashMap};
 use gimli;
 use object::{Object, ObjectSection, ObjectSymbol, RelocationKind, RelocationTarget};
 
-use crate::{DwpError, Result};
+use crate::{Error, Result};
 
 pub(crate) type DwpReader<'arena> =
     Relocate<'arena, gimli::EndianSlice<'arena, gimli::RunTimeEndian>>;
@@ -162,10 +162,10 @@ pub(crate) fn add_relocations(
                         relocation.set_addend(addend as i64);
                     }
                     Err(_) => {
-                        return Err(DwpError::RelocationWithInvalidSymbol(
+                        return Err(Error::RelocationWithInvalidSymbol(
                             section
                                 .name()
-                                .map_err(|e| DwpError::NamelessSection(e, offset))?
+                                .map_err(|e| Error::NamelessSection(e, offset))?
                                 .to_string(),
                             offset,
                         ));
@@ -174,14 +174,14 @@ pub(crate) fn add_relocations(
             }
 
             if relocations.insert(offset, relocation).is_some() {
-                return Err(DwpError::MultipleRelocations(
-                    section.name().map_err(|e| DwpError::NamelessSection(e, offset))?.to_string(),
+                return Err(Error::MultipleRelocations(
+                    section.name().map_err(|e| Error::NamelessSection(e, offset))?.to_string(),
                     offset,
                 ));
             }
         } else {
-            return Err(DwpError::UnsupportedRelocation(
-                section.name().map_err(|e| DwpError::NamelessSection(e, offset))?.to_string(),
+            return Err(Error::UnsupportedRelocation(
+                section.name().map_err(|e| Error::NamelessSection(e, offset))?.to_string(),
                 offset,
             ));
         }

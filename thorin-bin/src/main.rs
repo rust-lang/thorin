@@ -16,9 +16,9 @@ use tracing_tree::HierarchicalLayer;
 use typed_arena::Arena;
 
 #[derive(Debug, Error)]
-enum ThorinBinError {
+enum Error {
     #[error("Failed to create DWARF package")]
-    Packaging(#[source] thorin::DwpError),
+    Packaging(#[source] thorin::Error),
     #[error("Failed to create output object `{1}`")]
     CreateOutputFile(#[source] std::io::Error, String),
     #[error("Failed to emit output object to buffer")]
@@ -128,7 +128,7 @@ impl io::Write for Output {
     }
 }
 
-fn main() -> Result<(), ThorinBinError> {
+fn main() -> Result<(), Error> {
     let subscriber = Registry::default().with(EnvFilter::from_env("RUST_DWP_LOG")).with(
         HierarchicalLayer::default()
             .with_writer(io::stderr)
@@ -142,13 +142,12 @@ fn main() -> Result<(), ThorinBinError> {
     trace!(?opt);
 
     let sess = Session::default();
-    let obj =
-        thorin::package(&sess, opt.inputs, opt.executables).map_err(ThorinBinError::Packaging)?;
+    let obj = thorin::package(&sess, opt.inputs, opt.executables).map_err(Error::Packaging)?;
 
     let output_stream = Output::new(opt.output.as_ref())
-        .map_err(|e| ThorinBinError::CreateOutputFile(e, opt.output.display().to_string()))?;
+        .map_err(|e| Error::CreateOutputFile(e, opt.output.display().to_string()))?;
     let mut output_stream = StreamingBuffer::new(BufWriter::new(output_stream));
-    obj.emit(&mut output_stream).map_err(ThorinBinError::EmitOutputObject)?;
-    output_stream.result().map_err(ThorinBinError::WriteBuffer)?;
-    output_stream.into_inner().flush().map_err(ThorinBinError::FlushBufferedWriter)
+    obj.emit(&mut output_stream).map_err(Error::EmitOutputObject)?;
+    output_stream.result().map_err(Error::WriteBuffer)?;
+    output_stream.into_inner().flush().map_err(Error::FlushBufferedWriter)
 }
