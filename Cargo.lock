@@ -453,22 +453,22 @@ version = "0.1.0"
 dependencies = [
  "gimli",
  "indexmap",
- "memmap2",
  "object",
  "thiserror",
  "tracing",
- "typed-arena",
 ]
 
 [[package]]
 name = "thorin-bin"
 version = "0.1.0"
 dependencies = [
+ "memmap2",
  "structopt",
  "thorin",
  "tracing",
  "tracing-subscriber",
  "tracing-tree",
+ "typed-arena",
 ]
 
 [[package]]

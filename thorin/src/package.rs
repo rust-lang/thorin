@@ -8,7 +8,6 @@ use object::{
 };
 use std::{collections::HashSet, fmt};
 use tracing::{debug, trace};
-use typed_arena::Arena;
 
 use crate::{
     error::{DwpError, Result},
@@ -19,12 +18,13 @@ use crate::{
         DebugAbbrev, DebugCuIndex, DebugInfo, DebugLine, DebugLoc, DebugLocLists, DebugMacinfo,
         DebugMacro, DebugRngLists, DebugStr, DebugStrOffsets, DebugTuIndex, DebugTypes,
     },
-    relocate::DwpReader,
+    relocate::{DwpReader, RelocationMap},
     strings::DwpStringTable,
     util::{
         create_contribution_adjustor, dwo_identifier_of_unit, dwo_name, maybe_load_index_section,
         runtime_endian_from_endianness, CompressedDataRangeExt, LazySectionId,
     },
+    Session,
 };
 
 /// DWARF packages come in pre-standard GNU extension format or DWARF 5 standardized format.
@@ -312,12 +312,12 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
     /// Read the string offsets from `.debug_str_offsets.dwo` in the DWARF object, adding each to
     /// the in-progress `.debug_str` (`DwpStringTable`) and building a new `.debug_str_offsets.dwo`
     /// to be the current DWARF object's contribution to the DWARF package.
-    #[tracing::instrument(level = "trace", skip(arena_compression, input, input_dwarf))]
-    fn append_str_offsets<'input, 'arena: 'input>(
+    #[tracing::instrument(level = "trace", skip(sess, input, input_dwarf))]
+    fn append_str_offsets<'input, 'session: 'input>(
         &mut self,
-        arena_compression: &'arena Arena<Vec<u8>>,
+        sess: &'session impl Session<RelocationMap>,
         input: &object::File<'input>,
-        input_dwarf: &gimli::Dwarf<DwpReader<'arena>>,
+        input_dwarf: &gimli::Dwarf<DwpReader<'input>>,
         encoding: Encoding,
         format: PackageFormat,
     ) -> Result<Option<Contribution>> {
@@ -342,7 +342,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
             assert!(base.0 != 0);
             let size = base.0.try_into().expect("base offset is larger than a u64");
             let header_data = section
-                .compressed_data_range(arena_compression, 0, size)?
+                .compressed_data_range(sess, 0, size)?
                 .ok_or(DwpError::StrOffsetsMissingHeader)?;
             data.write(&header_data)?;
         }
@@ -404,20 +404,20 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
     /// target `DwarfObjectIdentifier`.
     #[tracing::instrument(
         level = "trace",
-        skip(arena_compression, section, unit, append_cu_contribution, append_tu_contribution)
+        skip(sess, section, unit, append_cu_contribution, append_tu_contribution)
     )]
-    fn append_unit<'input, 'arena: 'input, CuOp, Sect, TuOp>(
+    fn append_unit<'input, 'session: 'input, CuOp, Sect, TuOp>(
         &mut self,
-        arena_compression: &'arena Arena<Vec<u8>>,
+        sess: &'session impl Session<RelocationMap>,
         section: &Sect,
-        unit: &gimli::Unit<DwpReader<'arena>>,
+        unit: &gimli::Unit<DwpReader<'input>>,
         mut append_cu_contribution: CuOp,
         mut append_tu_contribution: TuOp,
     ) -> Result<()>
     where
         CuOp: FnMut(&mut Self, DwoId, Contribution) -> Result<()>,
         TuOp: FnMut(&mut Self, DebugTypeSignature, Contribution) -> Result<()>,
-        Sect: CompressedDataRangeExt<'input, 'arena>,
+        Sect: CompressedDataRangeExt<'input, 'session>,
     {
         let size: u64 = unit
             .header
@@ -444,7 +444,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                     .expect("offset from `.debug_info.dwo` section is not a `DebugInfoOffset`")
                     .0;
                 let data = section
-                    .compressed_data_range(arena_compression, offset.try_into().unwrap(), size)
+                    .compressed_data_range(sess, offset.try_into().unwrap(), size)
                     .map_err(DwpError::DecompressData)?
                     .ok_or(DwpError::EmptyUnit(dwo_id.0))?;
 
@@ -486,7 +486,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                     }
                 };
                 let data = section
-                    .compressed_data_range(arena_compression, offset.try_into().unwrap(), size)
+                    .compressed_data_range(sess, offset.try_into().unwrap(), size)
                     .map_err(DwpError::DecompressData)?
                     .ok_or(DwpError::EmptyUnit(type_signature.0))?;
 
@@ -513,12 +513,12 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
 
     /// Process a DWARF object. Copies relevant sections, compilation/type units and strings from
     /// DWARF object into output object.
-    #[tracing::instrument(level = "trace", skip(arena_compression, input, input_dwarf))]
-    pub(crate) fn append_dwarf_object<'input, 'arena: 'input>(
+    #[tracing::instrument(level = "trace", skip(sess, input, input_dwarf))]
+    pub(crate) fn append_dwarf_object<'input, 'session: 'input>(
         &mut self,
-        arena_compression: &'arena Arena<Vec<u8>>,
+        sess: &'session impl Session<RelocationMap>,
         input: &object::File<'input>,
-        input_dwarf: &gimli::Dwarf<DwpReader<'arena>>,
+        input_dwarf: &gimli::Dwarf<DwpReader<'input>>,
         encoding: Encoding,
         format: PackageFormat,
     ) -> Result<()> {
@@ -563,19 +563,13 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
         // Concatenate string offsets from the DWARF object into the `.debug_str_offsets` section
         // in the output, rewriting offsets to be based on the new, merged string table.
         let debug_str_offsets =
-            self.append_str_offsets(arena_compression, &input, &input_dwarf, encoding, format)?;
+            self.append_str_offsets(sess, &input, &input_dwarf, encoding, format)?;
 
         // Load index sections (if they exist).
-        let cu_index = maybe_load_index_section::<_, gimli::DebugCuIndex<_>, _>(
-            arena_compression,
-            self.endian,
-            input,
-        )?;
-        let tu_index = maybe_load_index_section::<_, gimli::DebugTuIndex<_>, _>(
-            arena_compression,
-            self.endian,
-            input,
-        )?;
+        let cu_index =
+            maybe_load_index_section::<_, gimli::DebugCuIndex<_>, _, _>(sess, self.endian, input)?;
+        let tu_index =
+            maybe_load_index_section::<_, gimli::DebugTuIndex<_>, _, _>(sess, self.endian, input)?;
 
         // Create offset adjustor functions, see comment on `create_contribution_adjustor` for
         // explanation.
@@ -614,7 +608,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
         while let Some(header) = iter.next().map_err(DwpError::ParseUnitHeader)? {
             let unit = input_dwarf.unit(header).map_err(DwpError::ParseUnit)?;
             self.append_unit(
-                arena_compression,
+                sess,
                 &debug_info_section,
                 &unit,
                 |this, dwo_id, debug_info| {
@@ -669,7 +663,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                 while let Some(header) = iter.next().map_err(DwpError::ParseUnitHeader)? {
                     let unit = input_dwarf.unit(header).map_err(DwpError::ParseUnit)?;
                     self.append_unit(
-                        arena_compression,
+                        sess,
                         &debug_types_section,
                         &unit,
                         |_, _, _| {

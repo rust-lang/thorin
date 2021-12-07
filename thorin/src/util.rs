@@ -1,11 +1,10 @@
 use gimli::{EndianSlice, RunTimeEndian, UnitIndex, UnitType};
-use memmap2::Mmap;
 use object::{
     write::{Object as WritableObject, SectionId},
     Endianness, Object, ObjectSection, SectionKind,
 };
 use std::{
-    borrow::{Borrow, Cow},
+    borrow::Cow,
     collections::HashSet,
     ffi::OsStr,
     fs::{File, OpenOptions},
@@ -13,7 +12,6 @@ use std::{
     path::{Path, PathBuf},
 };
 use tracing::debug;
-use typed_arena::Arena;
 
 use crate::{
     error::{DwpError, Result},
@@ -21,6 +19,7 @@ use crate::{
     marker::HasGimliId,
     package::{DwarfObjectIdentifier, PackageFormat},
     relocate::{add_relocations, DwpReader, Relocate, RelocationMap},
+    Session,
 };
 
 /// Helper function to return the name of a section in a dwarf object.
@@ -127,25 +126,25 @@ impl<Id: HasGimliId> LazySectionId<Id> {
 }
 
 /// Helper trait to add `compressed_data_range` function to `ObjectSection` types.
-pub(crate) trait CompressedDataRangeExt<'input, 'arena: 'input>:
-    ObjectSection<'arena>
+pub(crate) trait CompressedDataRangeExt<'input, 'session: 'input>:
+    ObjectSection<'input>
 {
     /// Return the decompressed contents of the section data in the given range.
     fn compressed_data_range(
         &self,
-        arena_compression: &'arena Arena<Vec<u8>>,
+        sess: &'session impl Session<RelocationMap>,
         address: u64,
         size: u64,
     ) -> object::Result<Option<&'input [u8]>>;
 }
 
-impl<'input, 'arena: 'input, S> CompressedDataRangeExt<'input, 'arena> for S
+impl<'input, 'session: 'input, S> CompressedDataRangeExt<'input, 'session> for S
 where
-    S: ObjectSection<'arena>,
+    S: ObjectSection<'input>,
 {
     fn compressed_data_range(
         &self,
-        arena_compression: &'arena Arena<Vec<u8>>,
+        sess: &'session impl Session<RelocationMap>,
         address: u64,
         size: u64,
     ) -> object::Result<Option<&'input [u8]>> {
@@ -163,10 +162,7 @@ where
             data.get(offset.try_into().ok()?..)?.get(..size.try_into().ok()?)
         }
 
-        let data_ref = match data {
-            Cow::Borrowed(data) => data,
-            Cow::Owned(data) => (*arena_compression.alloc(data)).borrow(),
-        };
+        let data_ref = sess.alloc_owned_cow(data);
         Ok(data_range(data_ref, self.address(), address, size))
     }
 }
@@ -205,8 +201,8 @@ impl<'input, Endian: gimli::Endianity> IndexSection<'input, Endian, EndianSlice<
 }
 
 /// Returns the parsed unit index from a `.debug_{cu,tu}_index` section.
-pub(crate) fn maybe_load_index_section<'input, 'arena: 'input, Endian, Index, R>(
-    arena_compression: &'arena Arena<Vec<u8>>,
+pub(crate) fn maybe_load_index_section<'input, 'session: 'input, Endian, Index, R, Sess>(
+    sess: &'session Sess,
     endian: Endian,
     input: &object::File<'input>,
 ) -> Result<Option<UnitIndex<R>>>
@@ -214,6 +210,7 @@ where
     Endian: gimli::Endianity,
     Index: IndexSection<'input, Endian, R>,
     R: gimli::Reader,
+    Sess: Session<RelocationMap>,
 {
     // UNWRAP: `Index` types provided known to have `dwo_name` value.
     let index_name = Index::id().dwo_name().unwrap();
@@ -222,10 +219,7 @@ where
             .compressed_data()
             .and_then(|d| d.decompress())
             .map_err(DwpError::DecompressData)?;
-        let index_data_ref = match index_data {
-            Cow::Borrowed(data) => data,
-            Cow::Owned(data) => (*arena_compression.alloc(data)).borrow(),
-        };
+        let index_data_ref = sess.alloc_owned_cow(index_data);
         let unit_index =
             Index::new(index_data_ref, endian).index().map_err(DwpError::ParseIndex)?;
         Ok(Some(unit_index))
@@ -384,38 +378,25 @@ pub(crate) fn dwo_id_and_path_of_unit<R: gimli::Reader>(
     Ok(Some((identifier, path)))
 }
 
-/// Helper function which opens a file for the given path and mmaps the input, returning a
-/// reference to the data in the arena.
-#[tracing::instrument(level = "trace", skip(arena_mmap))]
-pub(crate) fn open_and_mmap_input<'input, 'arena: 'input>(
-    arena_mmap: &'arena Arena<Mmap>,
-    path: &'input Path,
-) -> Result<&'arena [u8]> {
-    let file = File::open(&path).map_err(DwpError::OpenObjectFile)?;
-    let mmap = (unsafe { Mmap::map(&file) }).map_err(DwpError::MmapObjectFile)?;
-    Ok((*arena_mmap.alloc(mmap)).borrow().as_ref())
-}
-
 /// Load and parse an object file.
-#[tracing::instrument(level = "trace", skip(arena_mmap))]
-pub(crate) fn load_object_file<'input, 'arena: 'input>(
-    arena_mmap: &'arena Arena<Mmap>,
+#[tracing::instrument(level = "trace", skip(sess))]
+pub(crate) fn load_object_file<'input, 'session: 'input>(
+    sess: &'session impl Session<RelocationMap>,
     path: &'input Path,
-) -> Result<object::File<'arena>> {
-    let data = open_and_mmap_input(arena_mmap, path)?;
+) -> Result<object::File<'session>> {
+    let data = sess.read_input(path).map_err(DwpError::ReadInput)?;
     object::File::parse(data).map_err(|e| DwpError::ParseObjectFile(e, path.display().to_string()))
 }
 
 /// Loads a section of a file from `object::File` into a `gimli::EndianSlice`. Expected to be
 /// curried using a closure and provided to `Dwarf::load`.
-#[tracing::instrument(level = "trace", skip(obj, arena_data, arena_relocations))]
-pub(crate) fn load_file_section<'input, 'arena: 'input>(
+#[tracing::instrument(level = "trace", skip(sess, obj))]
+pub(crate) fn load_file_section<'input, 'session: 'input>(
+    sess: &'session impl Session<RelocationMap>,
     id: gimli::SectionId,
     obj: &object::File<'input>,
     is_dwo: bool,
-    arena_data: &'arena Arena<Cow<'input, [u8]>>,
-    arena_relocations: &'arena Arena<RelocationMap>,
-) -> Result<DwpReader<'arena>> {
+) -> Result<DwpReader<'input>> {
     let mut relocations = RelocationMap::default();
     let name = if is_dwo { id.dwo_name() } else { Some(id.name()) };
 
@@ -430,27 +411,25 @@ pub(crate) fn load_file_section<'input, 'arena: 'input>(
         None => Cow::Owned(Vec::with_capacity(1)),
     };
 
-    let data_ref = (*arena_data.alloc(data)).borrow();
+    let data_ref = sess.alloc_owned_cow(data);
     let reader =
         gimli::EndianSlice::new(data_ref, runtime_endian_from_endianness(obj.endianness()));
     let section = reader;
-    let relocations = (*arena_relocations.alloc(relocations)).borrow();
+    let relocations = sess.alloc_relocation(relocations);
     Ok(Relocate { relocations, section, reader })
 }
 
 /// Parse the executable, collect split unit identifiers to be found in input DWARF objects and add
 /// new input DWARF objects.
-#[tracing::instrument(level = "trace", skip(obj, arena_data, arena_relocations))]
-pub(crate) fn parse_executable<'input, 'arena: 'input>(
-    arena_data: &'arena Arena<Cow<'input, [u8]>>,
-    arena_relocations: &'arena Arena<RelocationMap>,
+#[tracing::instrument(level = "trace", skip(sess, obj))]
+pub(crate) fn parse_executable<'input, 'session: 'input>(
+    sess: &'session impl Session<RelocationMap>,
     obj: &object::File<'input>,
     target_dwarf_objects: &mut HashSet<DwarfObjectIdentifier>,
     dwarf_object_paths: &mut Vec<PathBuf>,
 ) -> Result<Option<(PackageFormat, object::Architecture, object::Endianness)>> {
-    let mut load_section = |id: gimli::SectionId| -> Result<_> {
-        load_file_section(id, &obj, false, &arena_data, &arena_relocations)
-    };
+    let mut load_section =
+        |id: gimli::SectionId| -> Result<_> { load_file_section(sess, id, &obj, false) };
 
     let dwarf = gimli::Dwarf::load(&mut load_section)?;
 

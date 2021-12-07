@@ -7,10 +7,8 @@ pub(crate) type Result<T> = std::result::Result<T, DwpError>;
 /// Diagnostics (and contexts) emitted during DWARF packaging.
 #[derive(Debug, Error)]
 pub enum DwpError {
-    #[error("Failed to open object file")]
-    OpenObjectFile(#[source] std::io::Error),
-    #[error("Failed to mmap object file")]
-    MmapObjectFile(#[source] std::io::Error),
+    #[error("Failed to read input file")]
+    ReadInput(#[source] std::io::Error),
     #[error("Failed to parse kind of input file")]
     ParseFileKind(#[source] object::Error),
     #[error("Failed to parse object file `{1}`")]
