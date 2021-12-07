@@ -1,13 +1,13 @@
+use std::{
+    borrow::Borrow,
+    ffi::OsStr,
+    fs::{File, OpenOptions},
+    io::{self, BufWriter, Write},
+    path::{Path, PathBuf},
+};
+
 use memmap2::Mmap;
 use object::write::StreamingBuffer;
-use std::borrow::Borrow;
-use std::ffi::OsStr;
-use std::fs::{File, OpenOptions};
-use std::path::Path;
-use std::{
-    io::{self, BufWriter, Write},
-    path::PathBuf,
-};
 use structopt::StructOpt;
 use thiserror::Error;
 use tracing::trace;

@@ -1,12 +1,13 @@
-use gimli::{EndianSlice, RunTimeEndian, UnitIndex, UnitType};
-use object::{
-    write::{Object as WritableObject, SectionId},
-    Endianness, Object, ObjectSection, SectionKind,
-};
 use std::{
     borrow::Cow,
     collections::HashSet,
     path::{Path, PathBuf},
+};
+
+use gimli::{EndianSlice, RunTimeEndian, UnitIndex, UnitType};
+use object::{
+    write::{Object as WritableObject, SectionId},
+    Endianness, Object, ObjectSection, SectionKind,
 };
 use tracing::debug;
 
