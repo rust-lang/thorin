@@ -1,79 +1,253 @@
-use thiserror::Error;
+use std::error::Error as StdError;
+use std::fmt;
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
+pub trait AsDynError<'a> {
+    fn as_dyn_error(&self) -> &(dyn StdError + 'a);
+}
+
+impl<'a, T: StdError + 'a> AsDynError<'a> for T {
+    #[inline]
+    fn as_dyn_error(&self) -> &(dyn StdError + 'a) {
+        self
+    }
+}
+
 /// Diagnostics (and contexts) emitted during DWARF packaging.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum Error {
-    #[error("Failed to read input file")]
-    ReadInput(#[source] std::io::Error),
-    #[error("Failed to parse kind of input file")]
-    ParseFileKind(#[source] object::Error),
-    #[error("Failed to parse object file")]
-    ParseObjectFile(#[source] object::Error),
-    #[error("Failed to parse archive file")]
-    ParseArchiveFile(#[source] object::Error),
-    #[error("Failed to parse archive member")]
-    ParseArchiveMember(#[source] object::Error),
-    #[error("Input is not an archive or elf file")]
+    /// Failure to read input file, this error occurs in the `Session::read_input` function
+    /// provided by the user of `thorin`.
+    ReadInput(std::io::Error),
+    /// Failed to parse kind of input file. Input file kind is necessary to determine how to parse
+    /// the rest of the input, and to validate that the input file is of a type that `thorin` can
+    /// process.
+    ParseFileKind(object::Error),
+    /// Failed to parse object file.
+    ParseObjectFile(object::Error),
+    /// Failed to parse archive file.
+    ParseArchiveFile(object::Error),
+    /// Failed to parse archive member.
+    ParseArchiveMember(object::Error),
+    /// Invalid kind of input. Only archive and elf files are supported input files.
     InvalidInputKind,
-    #[error("Failed to decompress data")]
-    DecompressData(#[source] object::Error),
-    #[error("Section without name at offset 0x{1:08x}")]
-    NamelessSection(#[source] object::Error, usize),
-    #[error("Relocation with invalid symbol for section `{0}` at offset 0x{1:08x}")]
+    /// Failed to decompress data. `thorin` uses `object` for decompression, so `object` probably
+    /// didn't have support for the type of compression used.
+    DecompressData(object::Error),
+    /// Section without a name.
+    NamelessSection(object::Error, usize),
+    /// Relocation has invalid symbol for a section.
     RelocationWithInvalidSymbol(String, usize),
-    #[error("Multiple relocations for section `{0}` at offset 0x{1:08x}")]
+    /// Multiple relocations for a section.
     MultipleRelocations(String, usize),
-    #[error("Unsupported relocation for section {0} at offset 0x{1:08x}")]
+    /// Unsupport relocations for a section.
     UnsupportedRelocation(String, usize),
-    #[error("Failed loading executable `{0}`")]
-    LoadingExecutable(String),
-    #[error("Missing path attribute to DWARF object 0x{0:08x}")]
+    /// Input object that has a `DwoId` (or `DebugTypeSignature`) does not have a
+    /// `DW_AT_GNU_dwo_name` or `DW_AT_dwo_name` attribute.
     MissingDwoName(u64),
-    #[error("Input DWARF object missing required section `{0}`")]
+    /// Section required of input DWARF objects was missing.
     MissingRequiredSection(&'static str),
-    #[error("Failed to parse unit header")]
-    ParseUnitHeader(#[source] gimli::read::Error),
-    #[error("Failed to parse unit")]
-    ParseUnit(#[source] gimli::read::Error),
-    #[error("Failed to concatenate `{1}` section from input DWARF object")]
-    AppendSection(#[source] object::Error, &'static str),
-    #[error("Failed to read header of `.debug_str_offsets.dwo` section")]
+    /// Failed to parse unit header.
+    ParseUnitHeader(gimli::read::Error),
+    /// Failed to parse unit.
+    ParseUnit(gimli::read::Error),
+    /// Failed to add a section to the output object.
+    AppendSection(object::Error, &'static str),
+    /// Input file is DWARF 5 format but the `.debug_str_offsets.dwo` section doesn't have a
+    /// header.
     StrOffsetsMissingHeader,
-    #[error("Failed to read offset at index {1} of `.debug_str_offsets.dwo` section")]
-    OffsetAtIndex(#[source] gimli::read::Error, u64),
-    #[error("Failed to read string at offset {1:08x} of `.debug_str.dwo` section")]
-    StrAtOffset(#[source] gimli::read::Error, usize),
-    #[error("Failed to write string to in-progress `.debug_str.dwo` section")]
-    WritingStrToStringTable(#[source] gimli::write::Error),
-    #[error("Failed to parse index section")]
-    ParseIndex(#[source] gimli::read::Error),
-    #[error("Unit 0x{0:08x} from input DWARF package is not in its index")]
+    /// Failed to read string offset from `.debug_str_offsets` at index.
+    OffsetAtIndex(gimli::read::Error, u64),
+    /// Failed to read string from `.debug_str` at offset.
+    StrAtOffset(gimli::read::Error, usize),
+    /// Failed to write string to string table.
+    WritingStrToStringTable(gimli::write::Error),
+    /// Failed to parse index section. If an input file is a DWARF package, its index section needs
+    /// to be read to ensure that the contributions within it are preserved.
+    ParseIndex(gimli::read::Error),
+    /// Compilation unit in DWARF package is not its index.
     UnitNotInIndex(u64),
-    #[error("Row {0} found in index's hash table not present in index")]
-    RowNotInIndex(#[source] gimli::read::Error, u32),
-    #[error("Section not found in unit's row in index")]
+    /// Row for a compilation unit is not in the index.
+    RowNotInIndex(gimli::read::Error, u32),
+    /// Section not found in unit's row in index, i.e. a DWARF package contains a section but its
+    /// index doesn't record contributions to it.
     SectionNotInRow,
-    #[error("Unit `{0}` in input DWARF object with no data")]
+    /// Compilation unit in input DWARF object has no content.
     EmptyUnit(u64),
-    #[error("Failed to write `.debug_cu_index` of output DWARF package")]
-    WriteCuIndex(#[source] gimli::write::Error),
-    #[error("Failed to write `.debug_tu_index` of output DWARF package")]
-    WriteTuIndex(#[source] gimli::write::Error),
-    #[error("Unit 0x{0:08x} was referenced by executable but not found")]
+    /// Failed to write `.debug_cu_index` to output.
+    WriteCuIndex(gimli::write::Error),
+    /// Failed to write `.debug_tu_index` to output.
+    WriteTuIndex(gimli::write::Error),
+    /// Unit referenced by an executable was not found.
     MissingReferencedUnit(u64),
-    #[error("No output object was created from inputs")]
+    /// No output object was created from inputs
     NoOutputObjectCreated,
 
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error(transparent)]
-    ObjectRead(#[from] object::Error),
-    #[error(transparent)]
-    ObjectWrite(#[from] object::write::Error),
-    #[error(transparent)]
-    GimliRead(#[from] gimli::read::Error),
-    #[error(transparent)]
-    GimliWrite(#[from] gimli::write::Error),
+    /// Catch-all for `std::io::Error`.
+    Io(std::io::Error),
+    /// Catch-all for `object::Error`.
+    ObjectRead(object::Error),
+    /// Catch-all for `object::write::Error`.
+    ObjectWrite(object::write::Error),
+    /// Catch-all for `gimli::read::Error`.
+    GimliRead(gimli::read::Error),
+    /// Catch-all for `gimli::write::Error`.
+    GimliWrite(gimli::write::Error),
+}
+
+impl StdError for Error {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Error::ReadInput(source) => Some(source.as_dyn_error()),
+            Error::ParseFileKind(source) => Some(source.as_dyn_error()),
+            Error::ParseObjectFile(source) => Some(source.as_dyn_error()),
+            Error::ParseArchiveFile(source) => Some(source.as_dyn_error()),
+            Error::ParseArchiveMember(source) => Some(source.as_dyn_error()),
+            Error::InvalidInputKind => None,
+            Error::DecompressData(source) => Some(source.as_dyn_error()),
+            Error::NamelessSection(source, _) => Some(source.as_dyn_error()),
+            Error::RelocationWithInvalidSymbol(_, _) => None,
+            Error::MultipleRelocations(_, _) => None,
+            Error::UnsupportedRelocation(_, _) => None,
+            Error::MissingDwoName(_) => None,
+            Error::MissingRequiredSection(_) => None,
+            Error::ParseUnitHeader(source) => Some(source.as_dyn_error()),
+            Error::ParseUnit(source) => Some(source.as_dyn_error()),
+            Error::AppendSection(source, _) => Some(source.as_dyn_error()),
+            Error::StrOffsetsMissingHeader => None,
+            Error::OffsetAtIndex(source, _) => Some(source.as_dyn_error()),
+            Error::StrAtOffset(source, _) => Some(source.as_dyn_error()),
+            Error::WritingStrToStringTable(source) => Some(source.as_dyn_error()),
+            Error::ParseIndex(source) => Some(source.as_dyn_error()),
+            Error::UnitNotInIndex(_) => None,
+            Error::RowNotInIndex(source, _) => Some(source.as_dyn_error()),
+            Error::SectionNotInRow => None,
+            Error::EmptyUnit(_) => None,
+            Error::WriteCuIndex(source) => Some(source.as_dyn_error()),
+            Error::WriteTuIndex(source) => Some(source.as_dyn_error()),
+            Error::MissingReferencedUnit(_) => None,
+            Error::NoOutputObjectCreated => None,
+            Error::Io(transparent) => StdError::source(transparent.as_dyn_error()),
+            Error::ObjectRead(transparent) => StdError::source(transparent.as_dyn_error()),
+            Error::ObjectWrite(transparent) => StdError::source(transparent.as_dyn_error()),
+            Error::GimliRead(transparent) => StdError::source(transparent.as_dyn_error()),
+            Error::GimliWrite(transparent) => StdError::source(transparent.as_dyn_error()),
+        }
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Error::ReadInput(_) => write!(f, "Failed to read input file"),
+            Error::ParseFileKind(_) => write!(f, "Failed to parse kind of input file"),
+            Error::ParseObjectFile(_) => write!(f, "Failed to parse object file"),
+            Error::ParseArchiveFile(_) => write!(f, "Failed to parse archive file"),
+            Error::ParseArchiveMember(_) => write!(f, "Failed to parse archive member"),
+            Error::InvalidInputKind => write!(f, "Input is not an archive or elf file"),
+            Error::DecompressData(_) => write!(f, "Failed to decompress data"),
+            Error::NamelessSection(_, offset) => {
+                write!(f, "Section without name at offset 0x{:08x}", offset)
+            }
+            Error::RelocationWithInvalidSymbol(section, offset) => write!(
+                f,
+                "Relocation with invalid symbol for section `{}` at offset 0x{:08x}",
+                section, offset
+            ),
+            Error::MultipleRelocations(section, offset) => write!(
+                f,
+                "Multiple relocations for section `{}` at offset 0x{:08x}",
+                section, offset
+            ),
+            Error::UnsupportedRelocation(section, offset) => write!(
+                f,
+                "Unsupported relocation for section {} at offset 0x{:08x}",
+                section, offset
+            ),
+            Error::MissingDwoName(id) => {
+                write!(f, "Missing path attribute to DWARF object 0x{:08x}", id)
+            }
+            Error::MissingRequiredSection(section) => {
+                write!(f, "Input DWARF object missing required section `{}`", section)
+            }
+            Error::ParseUnitHeader(_) => write!(f, "Failed to parse unit header"),
+            Error::ParseUnit(_) => write!(f, "Failed to parse unit"),
+            Error::AppendSection(_, section) => {
+                write!(f, "Failed to concatenate `{}` section from input DWARF object", section)
+            }
+            Error::StrOffsetsMissingHeader => {
+                write!(f, "Failed to read header of `.debug_str_offsets.dwo` section")
+            }
+            Error::OffsetAtIndex(_, index) => write!(
+                f,
+                "Failed to read offset at index {} of `.debug_str_offsets.dwo` section",
+                index
+            ),
+            Error::StrAtOffset(_, offset) => write!(
+                f,
+                "Failed to read string at offset {:08x} of `.debug_str.dwo` section",
+                offset
+            ),
+            Error::WritingStrToStringTable(_) => {
+                write!(f, "Failed to write string to in-progress `.debug_str.dwo` section")
+            }
+            Error::ParseIndex(_) => write!(f, "Failed to parse index section"),
+            Error::UnitNotInIndex(unit) => {
+                write!(f, "Unit 0x{0:08x} from input DWARF package is not in its index", unit)
+            }
+            Error::RowNotInIndex(_, row) => {
+                write!(f, "Row {0} found in index's hash table not present in index", row)
+            }
+            Error::SectionNotInRow => write!(f, "Section not found in unit's row in index"),
+            Error::EmptyUnit(unit) => {
+                write!(f, "Unit `{}` in input DWARF object with no data", unit)
+            }
+            Error::WriteCuIndex(_) => {
+                write!(f, "Failed to write `.debug_cu_index` of output DWARF package")
+            }
+            Error::WriteTuIndex(_) => {
+                write!(f, "Failed to write `.debug_tu_index` of output DWARF package")
+            }
+            Error::MissingReferencedUnit(unit) => {
+                write!(f, "Unit 0x{:08x} was referenced by executable but not found", unit)
+            }
+            Error::NoOutputObjectCreated => write!(f, "No output object was created from inputs"),
+            Error::Io(e) => fmt::Display::fmt(e, f),
+            Error::ObjectRead(e) => fmt::Display::fmt(e, f),
+            Error::ObjectWrite(e) => fmt::Display::fmt(e, f),
+            Error::GimliRead(e) => fmt::Display::fmt(e, f),
+            Error::GimliWrite(e) => fmt::Display::fmt(e, f),
+        }
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(source: std::io::Error) -> Self {
+        Error::Io(source)
+    }
+}
+
+impl From<object::Error> for Error {
+    fn from(source: object::Error) -> Self {
+        Error::ObjectRead(source)
+    }
+}
+
+impl From<object::write::Error> for Error {
+    fn from(source: object::write::Error) -> Self {
+        Error::ObjectWrite(source)
+    }
+}
+
+impl From<gimli::read::Error> for Error {
+    fn from(source: gimli::read::Error) -> Self {
+        Error::GimliRead(source)
+    }
+}
+
+impl From<gimli::write::Error> for Error {
+    fn from(source: gimli::write::Error) -> Self {
+        Error::GimliWrite(source)
+    }
 }
