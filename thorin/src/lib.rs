@@ -1,20 +1,19 @@
-use gimli::RunTimeEndian;
-use object::{Architecture, Endianness, FileKind, Object};
 use std::{
     borrow::Cow,
     collections::HashSet,
     path::{Path, PathBuf},
 };
+
+use gimli::RunTimeEndian;
+use object::{Architecture, Endianness, FileKind, Object};
 use tracing::{debug, trace};
 
 use crate::{
-    error::Result,
+    error::{DwpError, Result},
     package::{OutputPackage, PackageFormat},
     relocate::RelocationMap,
     util::{load_file_section, load_object_file, parse_executable},
 };
-
-pub use crate::error::DwpError;
 
 mod error;
 mod index;

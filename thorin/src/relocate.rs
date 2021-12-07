@@ -2,10 +2,12 @@
 //! to be fully relocated prior to parsing. Necessary to load object files that reference dwarf
 //! objects (not just executables). Implementation derived from Gimli's `dwarfdump` example.
 
-use crate::{DwpError, Result};
+use std::{borrow::Cow, collections::HashMap};
+
 use gimli;
 use object::{Object, ObjectSection, ObjectSymbol, RelocationKind, RelocationTarget};
-use std::{borrow::Cow, collections::HashMap};
+
+use crate::{DwpError, Result};
 
 pub(crate) type DwpReader<'arena> =
     Relocate<'arena, gimli::EndianSlice<'arena, gimli::RunTimeEndian>>;

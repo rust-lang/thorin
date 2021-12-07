@@ -1,3 +1,5 @@
+use std::{collections::HashSet, fmt};
+
 use gimli::{
     write::EndianVec, write::Writer, DebugStrOffsetsBase, DebugStrOffsetsIndex, DwarfFileType,
     Encoding, Format, Reader, RunTimeEndian, UnitType,
@@ -6,7 +8,6 @@ use object::{
     write::{Object as WritableObject, SectionId},
     BinaryFormat, Object, ObjectSection,
 };
-use std::{collections::HashSet, fmt};
 use tracing::{debug, trace};
 
 use crate::{

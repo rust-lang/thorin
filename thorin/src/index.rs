@@ -1,6 +1,7 @@
+use std::fmt;
+
 use gimli::write::{EndianVec, Result, Writer};
 use object::write::Object;
-use std::fmt;
 use tracing::{debug, trace};
 
 use crate::{

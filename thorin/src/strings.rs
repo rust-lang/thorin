@@ -1,10 +1,11 @@
+use std::collections::HashMap;
+
 use gimli::{
     write::{EndianVec, Result, Writer},
     DebugStrOffset,
 };
 use indexmap::IndexSet;
 use object::write::Object;
-use std::collections::HashMap;
 
 use crate::{marker::DebugStr, util::LazySectionId};
 
