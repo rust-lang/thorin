@@ -11,7 +11,7 @@ use object::{
 use tracing::{debug, trace};
 
 use crate::{
-    error::{DwpError, Result},
+    error::{Error, Result},
     index::{
         Bucketable, Contribution, ContributionOffset, CuIndexEntry, IndexCollection, TuIndexEntry,
     },
@@ -344,7 +344,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
             let size = base.0.try_into().expect("base offset is larger than a u64");
             let header_data = section
                 .compressed_data_range(sess, 0, size)?
-                .ok_or(DwpError::StrOffsetsMissingHeader)?;
+                .ok_or(Error::StrOffsetsMissingHeader)?;
             data.write(&header_data)?;
         }
 
@@ -361,17 +361,17 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
             let dwo_offset = input_dwarf
                 .debug_str_offsets
                 .get_str_offset(encoding.format, base, dwo_index)
-                .map_err(|e| DwpError::OffsetAtIndex(e, i))?;
+                .map_err(|e| Error::OffsetAtIndex(e, i))?;
             let dwo_str = input_dwarf
                 .debug_str
                 .get_str(dwo_offset)
-                .map_err(|e| DwpError::StrAtOffset(e, dwo_offset.0))?;
+                .map_err(|e| Error::StrAtOffset(e, dwo_offset.0))?;
             let dwo_str = dwo_str.to_string()?;
 
             let dwp_offset = self
                 .string_table
                 .get_or_insert(dwo_str.as_ref())
-                .map_err(DwpError::WritingStrToStringTable)?;
+                .map_err(Error::WritingStrToStringTable)?;
             debug!(?i, ?dwo_str, "dwo_offset={:#x} dwp_offset={:#x}", dwo_offset.0, dwp_offset.0);
 
             match encoding.format {
@@ -446,8 +446,8 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                     .0;
                 let data = section
                     .compressed_data_range(sess, offset.try_into().unwrap(), size)
-                    .map_err(DwpError::DecompressData)?
-                    .ok_or(DwpError::EmptyUnit(dwo_id.0))?;
+                    .map_err(Error::DecompressData)?
+                    .ok_or(Error::EmptyUnit(dwo_id.0))?;
 
                 if !data.is_empty() {
                     let id = self.debug_info.get(&mut self.obj);
@@ -488,8 +488,8 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
                 };
                 let data = section
                     .compressed_data_range(sess, offset.try_into().unwrap(), size)
-                    .map_err(DwpError::DecompressData)?
-                    .ok_or(DwpError::EmptyUnit(type_signature.0))?;
+                    .map_err(Error::DecompressData)?
+                    .ok_or(Error::EmptyUnit(type_signature.0))?;
 
                 if !data.is_empty() {
                     let id = match self.format {
@@ -529,34 +529,34 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
         // the output.
         let debug_abbrev = self
             .append_section(&input, DebugAbbrev)
-            .map_err(|e| DwpError::AppendSection(e, ".debug_abbrev.dwo"))?
-            .ok_or(DwpError::MissingRequiredSection(".debug_abbrev.dwo"))?;
+            .map_err(|e| Error::AppendSection(e, ".debug_abbrev.dwo"))?
+            .ok_or(Error::MissingRequiredSection(".debug_abbrev.dwo"))?;
         let debug_line = self
             .append_section(&input, DebugLine)
-            .map_err(|e| DwpError::AppendSection(e, ".debug_line.dwo"))?;
+            .map_err(|e| Error::AppendSection(e, ".debug_line.dwo"))?;
         let debug_macro = self
             .append_section(&input, DebugMacro)
-            .map_err(|e| DwpError::AppendSection(e, ".debug_macro.dwo"))?;
+            .map_err(|e| Error::AppendSection(e, ".debug_macro.dwo"))?;
 
         let (debug_loc, debug_macinfo, debug_loclists, debug_rnglists) = match self.format {
             PackageFormat::GnuExtension => {
                 // Only `.debug_loc.dwo` and `.debug_macinfo.dwo` with the GNU extension.
                 let debug_loc = self
                     .append_section(&input, DebugLoc)
-                    .map_err(|e| DwpError::AppendSection(e, ".debug_loc.dwo"))?;
+                    .map_err(|e| Error::AppendSection(e, ".debug_loc.dwo"))?;
                 let debug_macinfo = self
                     .append_section(&input, DebugMacinfo)
-                    .map_err(|e| DwpError::AppendSection(e, ".debug_macinfo.dwo"))?;
+                    .map_err(|e| Error::AppendSection(e, ".debug_macinfo.dwo"))?;
                 (debug_loc, debug_macinfo, None, None)
             }
             PackageFormat::DwarfStd => {
                 // Only `.debug_loclists.dwo` and `.debug_rnglists.dwo` with DWARF 5.
                 let debug_loclists = self
                     .append_section(&input, DebugLocLists)
-                    .map_err(|e| DwpError::AppendSection(e, ".debug_loclists.dwo"))?;
+                    .map_err(|e| Error::AppendSection(e, ".debug_loclists.dwo"))?;
                 let debug_rnglists = self
                     .append_section(&input, DebugRngLists)
-                    .map_err(|e| DwpError::AppendSection(e, ".debug_rnglists.dwo"))?;
+                    .map_err(|e| Error::AppendSection(e, ".debug_rnglists.dwo"))?;
                 (None, None, debug_loclists, debug_rnglists)
             }
         };
@@ -602,12 +602,12 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
         let debug_info_name = gimli::SectionId::DebugInfo.dwo_name().unwrap();
         let debug_info_section = input
             .section_by_name(debug_info_name)
-            .ok_or(DwpError::MissingRequiredSection(".debug_info.dwo"))?;
+            .ok_or(Error::MissingRequiredSection(".debug_info.dwo"))?;
 
         // Append compilation (and type units, in DWARF 5) from `.debug_info`.
         let mut iter = input_dwarf.units();
-        while let Some(header) = iter.next().map_err(DwpError::ParseUnitHeader)? {
-            let unit = input_dwarf.unit(header).map_err(DwpError::ParseUnit)?;
+        while let Some(header) = iter.next().map_err(Error::ParseUnitHeader)? {
+            let unit = input_dwarf.unit(header).map_err(Error::ParseUnit)?;
             self.append_unit(
                 sess,
                 &debug_info_section,
@@ -661,8 +661,8 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
             let debug_types_name = gimli::SectionId::DebugTypes.dwo_name().unwrap();
             if let Some(debug_types_section) = input.section_by_name(debug_types_name) {
                 let mut iter = input_dwarf.type_units();
-                while let Some(header) = iter.next().map_err(DwpError::ParseUnitHeader)? {
-                    let unit = input_dwarf.unit(header).map_err(DwpError::ParseUnit)?;
+                while let Some(header) = iter.next().map_err(Error::ParseUnitHeader)? {
+                    let unit = input_dwarf.unit(header).map_err(Error::ParseUnit)?;
                     self.append_unit(
                         sess,
                         &debug_types_section,
@@ -698,7 +698,7 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
     pub(crate) fn verify(&self, targets: &HashSet<DwarfObjectIdentifier>) -> Result<()> {
         if targets.difference(&self.seen_units).count() != 0 {
             let missing = targets.difference(&self.seen_units).cloned().collect();
-            return Err(DwpError::MissingReferencedUnit(missing));
+            return Err(Error::MissingReferencedUnit(missing));
         }
 
         Ok(())
@@ -712,11 +712,11 @@ impl<'file, Endian: gimli::Endianity> OutputPackage<'file, Endian> {
         debug!("writing cu index");
         self.cu_index_entries
             .write_index(self.endian, self.format, &mut self.obj, &mut self.debug_cu_index)
-            .map_err(DwpError::WriteCuIndex)?;
+            .map_err(Error::WriteCuIndex)?;
         debug!("writing tu index");
         self.tu_index_entries
             .write_index(self.endian, self.format, &mut self.obj, &mut self.debug_tu_index)
-            .map_err(DwpError::WriteTuIndex)?;
+            .map_err(Error::WriteTuIndex)?;
 
         Ok(self.obj)
     }

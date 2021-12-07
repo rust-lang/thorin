@@ -12,7 +12,7 @@ use object::{
 use tracing::debug;
 
 use crate::{
-    error::{DwpError, Result},
+    error::{Error, Result},
     index::{Bucketable, Contribution, ContributionOffset},
     marker::HasGimliId,
     package::{DwarfObjectIdentifier, PackageFormat},
@@ -161,10 +161,9 @@ where
         let index_data = index_section
             .compressed_data()
             .and_then(|d| d.decompress())
-            .map_err(DwpError::DecompressData)?;
+            .map_err(Error::DecompressData)?;
         let index_data_ref = sess.alloc_owned_cow(index_data);
-        let unit_index =
-            Index::new(index_data_ref, endian).index().map_err(DwpError::ParseIndex)?;
+        let unit_index = Index::new(index_data_ref, endian).index().map_err(Error::ParseIndex)?;
         Ok(Some(unit_index))
     } else {
         Ok(None)
@@ -212,13 +211,12 @@ where
                 // dwp input with section
                 (Some(index), Some(contribution)) => {
                     let identifier = identifier.index();
-                    let row_id =
-                        index.find(identifier).ok_or(DwpError::UnitNotInIndex(identifier))?;
+                    let row_id = index.find(identifier).ok_or(Error::UnitNotInIndex(identifier))?;
                     let section = index
                         .sections(row_id)
-                        .map_err(|e| DwpError::RowNotInIndex(e, row_id))?
+                        .map_err(|e| Error::RowNotInIndex(e, row_id))?
                         .find(|index_section| index_section.section == target_gimli_id)
-                        .ok_or(DwpError::SectionNotInRow)?;
+                        .ok_or(Error::SectionNotInRow)?;
                     let adjusted_offset: u64 = contribution.offset.0 + adjustment;
                     adjustment += section.size as u64;
 
@@ -304,7 +302,7 @@ pub(crate) fn dwo_id_and_path_of_unit<R: gimli::Reader>(
             // GNU Extension
             val
         } else {
-            return Err(DwpError::MissingDwoName(identifier.index()));
+            return Err(Error::MissingDwoName(identifier.index()));
         };
 
         dwarf.attr_string(&unit, dwo_name)?.to_string()?.into_owned()
@@ -327,8 +325,8 @@ pub(crate) fn load_object_file<'input, 'session: 'input>(
     sess: &'session impl Session<RelocationMap>,
     path: &'input Path,
 ) -> Result<object::File<'session>> {
-    let data = sess.read_input(path).map_err(DwpError::ReadInput)?;
-    object::File::parse(data).map_err(|e| DwpError::ParseObjectFile(e, path.display().to_string()))
+    let data = sess.read_input(path).map_err(Error::ReadInput)?;
+    object::File::parse(data).map_err(|e| Error::ParseObjectFile(e, path.display().to_string()))
 }
 
 /// Loads a section of a file from `object::File` into a `gimli::EndianSlice`. Expected to be
@@ -376,17 +374,16 @@ pub(crate) fn parse_executable<'input, 'session: 'input>(
 
     let dwarf = gimli::Dwarf::load(&mut load_section)?;
 
-    let format =
-        if let Some(root_header) = dwarf.units().next().map_err(DwpError::ParseUnitHeader)? {
-            PackageFormat::from_dwarf_version(root_header.version())
-        } else {
-            return Ok(None);
-        };
+    let format = if let Some(root_header) = dwarf.units().next().map_err(Error::ParseUnitHeader)? {
+        PackageFormat::from_dwarf_version(root_header.version())
+    } else {
+        return Ok(None);
+    };
     debug!(?format);
 
     let mut iter = dwarf.units();
-    while let Some(header) = iter.next().map_err(DwpError::ParseUnitHeader)? {
-        let unit = dwarf.unit(header).map_err(DwpError::ParseUnit)?;
+    while let Some(header) = iter.next().map_err(Error::ParseUnitHeader)? {
+        let unit = dwarf.unit(header).map_err(Error::ParseUnit)?;
         if let Some((target, path)) = dwo_id_and_path_of_unit(&dwarf, &unit)? {
             // Only add `DwoId`s to the target vector, not `DebugTypeSignature`s. There doesn't
             // appear to be a "skeleton type unit" to find the corresponding unit of (there are
