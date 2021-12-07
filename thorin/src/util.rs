@@ -6,9 +6,6 @@ use object::{
 use std::{
     borrow::Cow,
     collections::HashSet,
-    ffi::OsStr,
-    fs::{File, OpenOptions},
-    io,
     path::{Path, PathBuf},
 };
 use tracing::debug;
@@ -38,61 +35,6 @@ pub(crate) fn runtime_endian_from_endianness(endianness: Endianness) -> RunTimeE
     match endianness {
         Endianness::Little => RunTimeEndian::Little,
         Endianness::Big => RunTimeEndian::Big,
-    }
-}
-
-/// Returns `true` if the file type is a fifo.
-#[cfg(not(target_family = "unix"))]
-fn is_fifo(_: std::fs::FileType) -> bool {
-    false
-}
-
-/// Returns `true` if the file type is a fifo.
-#[cfg(target_family = "unix")]
-fn is_fifo(file_type: std::fs::FileType) -> bool {
-    use std::os::unix::fs::FileTypeExt;
-    file_type.is_fifo()
-}
-
-/// Wrapper around output writer which handles differences between stdout, file and pipe outputs.
-pub(crate) enum Output {
-    Stdout(io::Stdout),
-    File(File),
-    Pipe(File),
-}
-
-impl Output {
-    /// Create a `Output` from the input path (or "-" for stdout).
-    pub(crate) fn new(path: &OsStr) -> io::Result<Self> {
-        if path == "-" {
-            return Ok(Output::Stdout(io::stdout()));
-        }
-
-        let file =
-            OpenOptions::new().read(true).write(true).create(true).truncate(true).open(path)?;
-        if is_fifo(file.metadata()?.file_type()) {
-            Ok(Output::File(file))
-        } else {
-            Ok(Output::Pipe(file))
-        }
-    }
-}
-
-impl io::Write for Output {
-    fn flush(&mut self) -> io::Result<()> {
-        match self {
-            Output::Stdout(stdout) => stdout.flush(),
-            Output::Pipe(pipe) => pipe.flush(),
-            Output::File(file) => file.flush(),
-        }
-    }
-
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        match self {
-            Output::Stdout(stdout) => stdout.write(buf),
-            Output::Pipe(pipe) => pipe.write(buf),
-            Output::File(file) => file.write(buf),
-        }
     }
 }
 

@@ -11,7 +11,9 @@ edition = "2021"
 thorin = { path = "../thorin" }
 
 memmap2 = "0.5.0"
+object = { version  = "0.27.1", features = [ "archive", "read", "write", "compression" ] }
 structopt = "0.3.25"
+thiserror = "1.0.30"
 tracing = "0.1.29"
 tracing-subscriber = { version = "0.2.25", features = [ "env-filter" ] }
 tracing-tree = "0.1.10"

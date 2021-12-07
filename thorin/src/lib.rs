@@ -1,9 +1,8 @@
 use gimli::RunTimeEndian;
-use object::{write::StreamingBuffer, Architecture, Endianness, FileKind, Object};
+use object::{Architecture, Endianness, FileKind, Object};
 use std::{
     borrow::Cow,
     collections::HashSet,
-    io::{BufWriter, Write},
     path::{Path, PathBuf},
 };
 use tracing::{debug, trace};
@@ -12,7 +11,7 @@ use crate::{
     error::Result,
     package::{OutputPackage, PackageFormat},
     relocate::RelocationMap,
-    util::{load_file_section, load_object_file, parse_executable, Output},
+    util::{load_file_section, load_object_file, parse_executable},
 };
 
 pub use crate::error::DwpError;
@@ -101,8 +100,7 @@ pub fn package<'session>(
     sess: &'session impl Session<RelocationMap>,
     inputs: Vec<PathBuf>,
     executables: Option<Vec<PathBuf>>,
-    output_path: PathBuf,
-) -> Result<()> {
+) -> Result<object::write::Object> {
     let mut output_object_inputs = None;
 
     // Paths to DWARF objects to open (from positional arguments or referenced by executables).
@@ -186,16 +184,11 @@ pub fn package<'session>(
         }
     }
 
-    if let Some(output) = output {
-        output.verify(&target_dwarf_objects)?;
-
-        let output_stream = Output::new(output_path.as_ref())
-            .map_err(|e| DwpError::CreateOutputFile(e, output_path.display().to_string()))?;
-        let mut output_stream = StreamingBuffer::new(BufWriter::new(output_stream));
-        output.emit(&mut output_stream)?;
-        output_stream.result().map_err(DwpError::WriteBuffer)?;
-        output_stream.into_inner().flush().map_err(DwpError::FlushBufferedWriter)?;
+    match output {
+        Some(output) => {
+            output.verify(&target_dwarf_objects)?;
+            output.finish()
+        }
+        None => Err(DwpError::NoOutputObjectCreated),
     }
-
-    Ok(())
 }

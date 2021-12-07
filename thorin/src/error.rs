@@ -61,14 +61,10 @@ pub enum DwpError {
     WriteCuIndex(#[source] gimli::write::Error),
     #[error("Failed to write `.debug_tu_index` of output DWARF package")]
     WriteTuIndex(#[source] gimli::write::Error),
-    #[error("Failed to create output object `{1}`")]
-    CreateOutputFile(#[source] std::io::Error, String),
     #[error("Unit(s) {0:?} was referenced by executable but not found")]
     MissingReferencedUnit(Vec<DwarfObjectIdentifier>),
-    #[error("Failed to write output object to buffer")]
-    WriteBuffer(#[source] std::io::Error),
-    #[error("Failed to write output object to disk")]
-    FlushBufferedWriter(#[source] std::io::Error),
+    #[error("No output object was created from inputs")]
+    NoOutputObjectCreated,
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
