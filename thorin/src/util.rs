@@ -157,7 +157,9 @@ where
             .and_then(|d| d.decompress())
             .map_err(Error::DecompressData)?;
         let index_data_ref = sess.alloc_owned_cow(index_data);
-        let unit_index = Index::new(index_data_ref, endian).index().map_err(Error::ParseIndex)?;
+        let unit_index = Index::new(index_data_ref, endian)
+            .index()
+            .map_err(|e| Error::ParseIndex(e, index_name.to_string()))?;
 
         if !format.is_compatible_index_version(unit_index.version()) {
             return Err(Error::IncompatibleIndexVersion(
