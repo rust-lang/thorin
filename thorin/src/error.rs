@@ -52,6 +52,8 @@ pub enum Error {
     ParseUnitHeader(gimli::read::Error),
     /// Failed to parse unit.
     ParseUnit(gimli::read::Error),
+    /// Input DWARF package has a different index version than the version being output.
+    IncompatibleIndexVersion(String, String, u16),
     /// Failed to add a section to the output object.
     AppendSection(object::Error, &'static str),
     /// Input file is DWARF 5 format but the `.debug_str_offsets.dwo` section doesn't have a
@@ -114,6 +116,7 @@ impl StdError for Error {
             Error::MissingRequiredSection(_) => None,
             Error::ParseUnitHeader(source) => Some(source.as_dyn_error()),
             Error::ParseUnit(source) => Some(source.as_dyn_error()),
+            Error::IncompatibleIndexVersion(_, _, _) => None,
             Error::AppendSection(source, _) => Some(source.as_dyn_error()),
             Error::StrOffsetsMissingHeader => None,
             Error::OffsetAtIndex(source, _) => Some(source.as_dyn_error()),
@@ -173,6 +176,13 @@ impl fmt::Display for Error {
             }
             Error::ParseUnitHeader(_) => write!(f, "Failed to parse unit header"),
             Error::ParseUnit(_) => write!(f, "Failed to parse unit"),
+            Error::IncompatibleIndexVersion(section, format, actual) => {
+                write!(
+                    f,
+                    "Incompatible `{}` index version {} for {} format",
+                    section, actual, format
+                )
+            }
             Error::AppendSection(_, section) => {
                 write!(f, "Failed to concatenate `{}` section from input DWARF object", section)
             }

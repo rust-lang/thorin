@@ -50,13 +50,21 @@ impl PackageFormat {
             PackageFormat::GnuExtension
         }
     }
+
+    /// Returns `true` if the index version provided is compatible with the current format.
+    pub(crate) fn is_compatible_index_version(&self, index_version: u16) -> bool {
+        match *self {
+            PackageFormat::DwarfStd => index_version >= 5,
+            PackageFormat::GnuExtension => index_version == 2,
+        }
+    }
 }
 
 impl fmt::Display for PackageFormat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             PackageFormat::GnuExtension => write!(f, "GNU Extension"),
-            PackageFormat::DwarfStd => write!(f, "Dwarf Standard"),
+            PackageFormat::DwarfStd => write!(f, "DWARF Standard"),
         }
     }
 }
@@ -530,6 +538,20 @@ impl<'file> InProgressDwarfPackage<'file> {
     ) -> Result<()> {
         use gimli::SectionId::*;
 
+        // Load index sections (if they exist).
+        let cu_index = maybe_load_index_section::<_, gimli::DebugCuIndex<_>, _, _>(
+            sess,
+            self.format,
+            self.endian,
+            input,
+        )?;
+        let tu_index = maybe_load_index_section::<_, gimli::DebugTuIndex<_>, _, _>(
+            sess,
+            self.format,
+            self.endian,
+            input,
+        )?;
+
         // Concatenate contents of sections from the DWARF object into the corresponding section in
         // the output.
         let debug_abbrev = self
@@ -570,12 +592,6 @@ impl<'file> InProgressDwarfPackage<'file> {
         // in the output, rewriting offsets to be based on the new, merged string table.
         let debug_str_offsets =
             self.append_str_offsets(sess, &input, &input_dwarf, encoding, format)?;
-
-        // Load index sections (if they exist).
-        let cu_index =
-            maybe_load_index_section::<_, gimli::DebugCuIndex<_>, _, _>(sess, self.endian, input)?;
-        let tu_index =
-            maybe_load_index_section::<_, gimli::DebugTuIndex<_>, _, _>(sess, self.endian, input)?;
 
         // Create offset adjustor functions, see comment on `create_contribution_adjustor` for
         // explanation.
