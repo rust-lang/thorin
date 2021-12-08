@@ -81,6 +81,8 @@ pub enum Error {
     WriteCuIndex(gimli::write::Error),
     /// Failed to write `.debug_tu_index` to output.
     WriteTuIndex(gimli::write::Error),
+    /// Found duplicate split compilation unit.
+    DuplicateUnit(u64),
     /// Unit referenced by an executable was not found.
     MissingReferencedUnit(u64),
     /// No output object was created from inputs
@@ -129,6 +131,7 @@ impl StdError for Error {
             Error::EmptyUnit(_) => None,
             Error::WriteCuIndex(source) => Some(source.as_dyn_error()),
             Error::WriteTuIndex(source) => Some(source.as_dyn_error()),
+            Error::DuplicateUnit(_) => None,
             Error::MissingReferencedUnit(_) => None,
             Error::NoOutputObjectCreated => None,
             Error::Io(transparent) => StdError::source(transparent.as_dyn_error()),
@@ -218,6 +221,9 @@ impl fmt::Display for Error {
             }
             Error::WriteTuIndex(_) => {
                 write!(f, "Failed to write `.debug_tu_index` of output DWARF package")
+            }
+            Error::DuplicateUnit(unit) => {
+                write!(f, "Found duplicate split compilation unit (0x{:08x})", unit)
             }
             Error::MissingReferencedUnit(unit) => {
                 write!(f, "Unit 0x{:08x} was referenced by executable but not found", unit)
