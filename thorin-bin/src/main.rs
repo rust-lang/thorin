@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use anyhow::{Context, Result};
 use memmap2::Mmap;
 use object::write::StreamingBuffer;
 use structopt::StructOpt;
@@ -17,17 +18,20 @@ use typed_arena::Arena;
 
 #[derive(Debug, Error)]
 enum Error {
-    #[error("Failed to create output object `{1}`")]
-    CreateOutputFile(#[source] std::io::Error, String),
+    #[error("Failed to add input object to DWARF package")]
+    AddInputObject,
+    #[error("Failed to add referenced DWARF object/packages from executable to DWARF package")]
+    AddExecutable,
+    #[error("Failed to create output object")]
+    CreateOutputFile,
+    #[error("Failed to finish creation of DWARF package")]
+    Finish,
     #[error("Failed to emit output object to buffer")]
-    EmitOutputObject(#[source] object::write::Error),
+    EmitOutputObject,
     #[error("Failed to write output object to buffer")]
-    WriteBuffer(#[source] std::io::Error),
+    WriteBuffer,
     #[error("Failed to write output object to disk")]
-    FlushBufferedWriter(#[source] std::io::Error),
-
-    #[error(transparent)]
-    Thorin(#[from] thorin::Error),
+    FlushBufferedWriter,
 }
 
 #[derive(Debug, StructOpt)]
@@ -129,7 +133,7 @@ impl io::Write for Output {
     }
 }
 
-fn main() -> Result<(), Error> {
+fn main() -> Result<()> {
     let subscriber = Registry::default().with(EnvFilter::from_env("RUST_DWP_LOG")).with(
         HierarchicalLayer::default()
             .with_writer(io::stderr)
@@ -146,7 +150,7 @@ fn main() -> Result<(), Error> {
     let mut package = thorin::DwarfPackage::new(&sess);
 
     for input in opt.inputs {
-        package.add_input_object(&input).map_err(Error::Thorin)?;
+        package.add_input_object(&input).context(Error::AddInputObject)?;
     }
 
     if let Some(executables) = opt.executables {
@@ -154,18 +158,19 @@ fn main() -> Result<(), Error> {
             // Failing to read the referenced object might be expected if the path referenced by
             // the executable isn't found but the referenced DWARF object is later found as an
             // input - calling `finish` will return an error in this case.
-            package.add_executable(&executable, thorin::MissingReferencedObjectBehaviour::Skip)?;
+            package
+                .add_executable(&executable, thorin::MissingReferencedObjectBehaviour::Skip)
+                .context(Error::AddExecutable)?;
         }
     }
 
-    let output_stream = Output::new(opt.output.as_ref())
-        .map_err(|e| Error::CreateOutputFile(e, opt.output.display().to_string()))?;
+    let output_stream = Output::new(opt.output.as_ref()).context(Error::CreateOutputFile)?;
     let mut output_stream = StreamingBuffer::new(BufWriter::new(output_stream));
     package
         .finish()
-        .map_err(Error::Thorin)?
+        .context(Error::Finish)?
         .emit(&mut output_stream)
-        .map_err(Error::EmitOutputObject)?;
-    output_stream.result().map_err(Error::WriteBuffer)?;
-    output_stream.into_inner().flush().map_err(Error::FlushBufferedWriter)
+        .context(Error::EmitOutputObject)?;
+    output_stream.result().context(Error::WriteBuffer)?;
+    output_stream.into_inner().flush().context(Error::FlushBufferedWriter)
 }
