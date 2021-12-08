@@ -437,7 +437,7 @@ impl<'file> InProgressDwarfPackage<'file> {
             .header
             .length_including_self()
             .try_into()
-            .expect("unit header lenghh bigger than u64");
+            .expect("unit header length bigger than u64");
         let offset = unit.header.offset();
 
         let identifier = dwo_identifier_of_unit(&unit);
@@ -448,9 +448,7 @@ impl<'file> InProgressDwarfPackage<'file> {
             ) => {
                 debug!(?dwo_id, "compilation unit");
                 if self.contained_units.contains(&DwarfObjectIdentifier::Compilation(dwo_id)) {
-                    // Return early if a unit with this type signature has already been seen.
-                    debug!(?dwo_id, "skipping, already seen");
-                    return Ok(());
+                    return Err(Error::DuplicateUnit(dwo_id.0));
                 }
 
                 let offset = offset

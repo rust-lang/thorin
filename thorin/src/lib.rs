@@ -240,6 +240,15 @@ where
             // normal type units in an executable, but should we expect to find a corresponding
             // split type unit for those?).
             if matches!(target, DwarfObjectIdentifier::Compilation(_)) {
+                // Input objects are processed first, if a DWARF object referenced by this
+                // executable was already found then don't add it to the target and try to add it
+                // again.
+                if let Some(package) = &self.maybe_in_progress {
+                    if package.contained_units().contains(&target) {
+                        continue;
+                    }
+                }
+
                 debug!(?target, "adding target");
                 self.targets.insert(target);
             }
