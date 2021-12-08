@@ -8,7 +8,7 @@ use crate::{
     error::{Error, Result},
     index::{Bucketable, Contribution, ContributionOffset},
     marker::HasGimliId,
-    package::DwarfObjectIdentifier,
+    package::{DwarfObjectIdentifier, PackageFormat},
     relocate::RelocationMap,
     Session,
 };
@@ -139,6 +139,7 @@ impl<'input, Endian: gimli::Endianity> IndexSection<'input, Endian, EndianSlice<
 /// Returns the parsed unit index from a `.debug_{cu,tu}_index` section.
 pub(crate) fn maybe_load_index_section<'input, 'session: 'input, Endian, Index, R, Sess>(
     sess: &'session Sess,
+    format: PackageFormat,
     endian: Endian,
     input: &object::File<'input>,
 ) -> Result<Option<UnitIndex<R>>>
@@ -157,6 +158,15 @@ where
             .map_err(Error::DecompressData)?;
         let index_data_ref = sess.alloc_owned_cow(index_data);
         let unit_index = Index::new(index_data_ref, endian).index().map_err(Error::ParseIndex)?;
+
+        if !format.is_compatible_index_version(unit_index.version()) {
+            return Err(Error::IncompatibleIndexVersion(
+                index_name.to_string(),
+                format.to_string(),
+                unit_index.version(),
+            ));
+        }
+
         Ok(Some(unit_index))
     } else {
         Ok(None)
