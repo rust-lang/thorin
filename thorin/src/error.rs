@@ -67,7 +67,7 @@ pub enum Error {
     WritingStrToStringTable(gimli::write::Error),
     /// Failed to parse index section. If an input file is a DWARF package, its index section needs
     /// to be read to ensure that the contributions within it are preserved.
-    ParseIndex(gimli::read::Error),
+    ParseIndex(gimli::read::Error, String),
     /// Compilation unit in DWARF package is not its index.
     UnitNotInIndex(u64),
     /// Row for a compilation unit is not in the index.
@@ -122,7 +122,7 @@ impl StdError for Error {
             Error::OffsetAtIndex(source, _) => Some(source.as_dyn_error()),
             Error::StrAtOffset(source, _) => Some(source.as_dyn_error()),
             Error::WritingStrToStringTable(source) => Some(source.as_dyn_error()),
-            Error::ParseIndex(source) => Some(source.as_dyn_error()),
+            Error::ParseIndex(source, _) => Some(source.as_dyn_error()),
             Error::UnitNotInIndex(_) => None,
             Error::RowNotInIndex(source, _) => Some(source.as_dyn_error()),
             Error::SectionNotInRow => None,
@@ -202,7 +202,7 @@ impl fmt::Display for Error {
             Error::WritingStrToStringTable(_) => {
                 write!(f, "Failed to write string to in-progress `.debug_str.dwo` section")
             }
-            Error::ParseIndex(_) => write!(f, "Failed to parse index section"),
+            Error::ParseIndex(_, section) => write!(f, "Failed to parse `{}` section", section),
             Error::UnitNotInIndex(unit) => {
                 write!(f, "Unit 0x{0:08x} from input DWARF package is not in its index", unit)
             }
