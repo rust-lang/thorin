@@ -53,7 +53,7 @@ pub enum Error {
     /// Failed to parse unit.
     ParseUnit(gimli::read::Error),
     /// Input DWARF package has a different index version than the version being output.
-    IncompatibleIndexVersion(String, String, u16),
+    IncompatibleIndexVersion(String, u16, u16),
     /// Failed to add a section to the output object.
     AppendSection(object::Error, &'static str),
     /// Input file is DWARF 5 format but the `.debug_str_offsets.dwo` section doesn't have a
@@ -77,16 +77,14 @@ pub enum Error {
     SectionNotInRow,
     /// Compilation unit in input DWARF object has no content.
     EmptyUnit(u64),
-    /// Failed to write `.debug_cu_index` to output.
-    WriteCuIndex(gimli::write::Error),
-    /// Failed to write `.debug_tu_index` to output.
-    WriteTuIndex(gimli::write::Error),
     /// Found duplicate split compilation unit.
     DuplicateUnit(u64),
     /// Unit referenced by an executable was not found.
     MissingReferencedUnit(u64),
     /// No output object was created from inputs
     NoOutputObjectCreated,
+    /// Input objects have different encodings.
+    MixedInputEncodings,
 
     /// Catch-all for `std::io::Error`.
     Io(std::io::Error),
@@ -129,11 +127,10 @@ impl StdError for Error {
             Error::RowNotInIndex(source, _) => Some(source.as_dyn_error()),
             Error::SectionNotInRow => None,
             Error::EmptyUnit(_) => None,
-            Error::WriteCuIndex(source) => Some(source.as_dyn_error()),
-            Error::WriteTuIndex(source) => Some(source.as_dyn_error()),
             Error::DuplicateUnit(_) => None,
             Error::MissingReferencedUnit(_) => None,
             Error::NoOutputObjectCreated => None,
+            Error::MixedInputEncodings => None,
             Error::Io(transparent) => StdError::source(transparent.as_dyn_error()),
             Error::ObjectRead(transparent) => StdError::source(transparent.as_dyn_error()),
             Error::ObjectWrite(transparent) => StdError::source(transparent.as_dyn_error()),
@@ -182,7 +179,7 @@ impl fmt::Display for Error {
             Error::IncompatibleIndexVersion(section, format, actual) => {
                 write!(
                     f,
-                    "Incompatible `{}` index version {} for {} format",
+                    "Incompatible `{}` index version: found version {}, expected version {}",
                     section, actual, format
                 )
             }
@@ -216,12 +213,6 @@ impl fmt::Display for Error {
             Error::EmptyUnit(unit) => {
                 write!(f, "Unit `{}` in input DWARF object with no data", unit)
             }
-            Error::WriteCuIndex(_) => {
-                write!(f, "Failed to write `.debug_cu_index` of output DWARF package")
-            }
-            Error::WriteTuIndex(_) => {
-                write!(f, "Failed to write `.debug_tu_index` of output DWARF package")
-            }
             Error::DuplicateUnit(unit) => {
                 write!(f, "Found duplicate split compilation unit (0x{:08x})", unit)
             }
@@ -229,6 +220,7 @@ impl fmt::Display for Error {
                 write!(f, "Unit 0x{:08x} was referenced by executable but not found", unit)
             }
             Error::NoOutputObjectCreated => write!(f, "No output object was created from inputs"),
+            Error::MixedInputEncodings => write!(f, "Input objects haved mixed encodings"),
             Error::Io(e) => fmt::Display::fmt(e, f),
             Error::ObjectRead(e) => fmt::Display::fmt(e, f),
             Error::ObjectWrite(e) => fmt::Display::fmt(e, f),

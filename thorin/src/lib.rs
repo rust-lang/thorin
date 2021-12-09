@@ -14,7 +14,7 @@ use tracing::{debug, trace};
 use crate::{
     error::Result,
     index::Bucketable,
-    package::{DwarfObjectIdentifier, InProgressDwarfPackage, PackageFormat},
+    package::{DwarfObjectIdentifier, InProgressDwarfPackage},
     relocate::{add_relocations, DwpReader, Relocate, RelocationMap},
     util::{dwo_identifier_of_unit, runtime_endian_from_endianness},
 };
@@ -146,13 +146,11 @@ where
     /// yet.
     fn in_progress_package(
         &mut self,
-        format: PackageFormat,
         architecture: Architecture,
         endianness: Endianness,
     ) -> &mut InProgressDwarfPackage<'output> {
         if self.maybe_in_progress.is_none() {
-            self.maybe_in_progress =
-                Some(InProgressDwarfPackage::new(format, architecture, endianness));
+            self.maybe_in_progress = Some(InProgressDwarfPackage::new(architecture, endianness));
         }
 
         // EXPECT: in-progress package already exists or was just created
@@ -173,15 +171,13 @@ where
                 return Ok(());
             }
         };
-        let format = PackageFormat::from_dwarf_version(root_header.version());
 
         let sess = self.sess;
-        self.in_progress_package(format, obj.architecture(), obj.endianness()).append_dwarf_object(
+        self.in_progress_package(obj.architecture(), obj.endianness()).append_dwarf_object(
             sess,
             obj,
             &dwarf,
             root_header.encoding(),
-            format,
         )
     }
 

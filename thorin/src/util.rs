@@ -1,4 +1,4 @@
-use gimli::{EndianSlice, RunTimeEndian, UnitIndex, UnitType};
+use gimli::{Encoding, EndianSlice, RunTimeEndian, UnitIndex, UnitType};
 use object::{
     write::{Object as WritableObject, SectionId},
     Endianness, Object, ObjectSection, SectionKind,
@@ -8,7 +8,7 @@ use crate::{
     error::{Error, Result},
     index::{Bucketable, Contribution, ContributionOffset},
     marker::HasGimliId,
-    package::{DwarfObjectIdentifier, PackageFormat},
+    package::{DwarfObjectIdentifier, PackageFormatExt},
     relocate::RelocationMap,
     Session,
 };
@@ -139,7 +139,7 @@ impl<'input, Endian: gimli::Endianity> IndexSection<'input, Endian, EndianSlice<
 /// Returns the parsed unit index from a `.debug_{cu,tu}_index` section.
 pub(crate) fn maybe_load_index_section<'input, 'session: 'input, Endian, Index, R, Sess>(
     sess: &'session Sess,
-    format: PackageFormat,
+    encoding: Encoding,
     endian: Endian,
     input: &object::File<'input>,
 ) -> Result<Option<UnitIndex<R>>>
@@ -161,10 +161,10 @@ where
             .index()
             .map_err(|e| Error::ParseIndex(e, index_name.to_string()))?;
 
-        if !format.is_compatible_index_version(unit_index.version()) {
+        if !encoding.is_compatible_dwarf_package_index_version(unit_index.version()) {
             return Err(Error::IncompatibleIndexVersion(
                 index_name.to_string(),
-                format.to_string(),
+                encoding.dwarf_package_index_version(),
                 unit_index.version(),
             ));
         }
