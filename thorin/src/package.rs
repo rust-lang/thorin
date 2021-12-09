@@ -614,6 +614,10 @@ impl<'file> InProgressDwarfPackage<'file> {
             create_contribution_adjustor::<_, crate::marker::DebugAbbrev, _>(tu_index.as_ref());
         let mut line_tu_adjustor =
             create_contribution_adjustor::<_, crate::marker::DebugLine, _>(tu_index.as_ref());
+        let mut loclists_tu_adjustor =
+            create_contribution_adjustor::<_, crate::marker::DebugLocLists, _>(tu_index.as_ref());
+        let mut rnglists_tu_adjustor =
+            create_contribution_adjustor::<_, crate::marker::DebugRngLists, _>(tu_index.as_ref());
         let mut str_offsets_tu_adjustor =
             create_contribution_adjustor::<_, crate::marker::DebugStrOffsets, _>(tu_index.as_ref());
 
@@ -660,6 +664,8 @@ impl<'file> InProgressDwarfPackage<'file> {
                     let debug_abbrev = abbrev_tu_adjustor(type_sig, Some(debug_abbrev))?
                         .expect("mandatory section cannot be adjusted");
                     let debug_line = line_tu_adjustor(type_sig, debug_line)?;
+                    let debug_loclists = loclists_tu_adjustor(type_sig, debug_loclists)?;
+                    let debug_rnglists = rnglists_tu_adjustor(type_sig, debug_rnglists)?;
                     let debug_str_offsets = str_offsets_tu_adjustor(type_sig, debug_str_offsets)?;
 
                     this.tu_index_entries.push(TuIndexEntry {
@@ -667,6 +673,8 @@ impl<'file> InProgressDwarfPackage<'file> {
                         debug_info_or_types: debug_info,
                         debug_abbrev,
                         debug_line,
+                        debug_loclists,
+                        debug_rnglists,
                         debug_str_offsets,
                     });
                     Ok(())
@@ -694,6 +702,8 @@ impl<'file> InProgressDwarfPackage<'file> {
                             let debug_abbrev = abbrev_tu_adjustor(type_sig, Some(debug_abbrev))?
                                 .expect("mandatory section cannot be adjusted");
                             let debug_line = line_tu_adjustor(type_sig, debug_line)?;
+                            let debug_loclists = loclists_tu_adjustor(type_sig, debug_loclists)?;
+                            let debug_rnglists = rnglists_tu_adjustor(type_sig, debug_rnglists)?;
                             let debug_str_offsets =
                                 str_offsets_tu_adjustor(type_sig, debug_str_offsets)?;
 
@@ -702,6 +712,8 @@ impl<'file> InProgressDwarfPackage<'file> {
                                 debug_info_or_types,
                                 debug_abbrev,
                                 debug_line,
+                                debug_loclists,
+                                debug_rnglists,
                                 debug_str_offsets,
                             });
                             Ok(())

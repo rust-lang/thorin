@@ -104,12 +104,17 @@ pub(crate) struct Contribution {
 }
 
 /// Entry into the `.debug_tu_index` section.
+///
+/// Contributions from `.debug_loclists.dwo` and `.debug_rnglists.dwo` from type units aren't
+/// defined in the DWARF 5 specification but are tested by `llvm-dwp`'s test suite.
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct TuIndexEntry {
     pub(crate) type_signature: DebugTypeSignature,
     pub(crate) debug_info_or_types: Contribution,
     pub(crate) debug_abbrev: Contribution,
     pub(crate) debug_line: Option<Contribution>,
+    pub(crate) debug_loclists: Option<Contribution>,
+    pub(crate) debug_rnglists: Option<Contribution>,
     pub(crate) debug_str_offsets: Option<Contribution>,
 }
 
@@ -117,6 +122,8 @@ impl IndexEntry for TuIndexEntry {
     fn number_of_columns(&self, _: PackageFormat) -> u32 {
         2 /* info/types and abbrev are required columns */
         + self.debug_line.map_or(0, |_| 1)
+        + self.debug_loclists.map_or(0, |_| 1)
+        + self.debug_rnglists.map_or(0, |_| 1)
         + self.debug_str_offsets.map_or(0, |_| 1)
     }
 
@@ -146,6 +153,12 @@ impl IndexEntry for TuIndexEntry {
                 if self.debug_line.is_some() {
                     out.write_u32(gimli::DW_SECT_LINE.0)?;
                 }
+                if self.debug_loclists.is_some() {
+                    out.write_u32(gimli::DW_SECT_LOCLISTS.0)?;
+                }
+                if self.debug_rnglists.is_some() {
+                    out.write_u32(gimli::DW_SECT_RNGLISTS.0)?;
+                }
                 if self.debug_str_offsets.is_some() {
                     out.write_u32(gimli::DW_SECT_STR_OFFSETS.0)?;
                 }
@@ -169,6 +182,12 @@ impl IndexEntry for TuIndexEntry {
         out.write_u32(proj(self.debug_abbrev))?;
         if let Some(debug_line) = self.debug_line {
             out.write_u32(proj(debug_line))?;
+        }
+        if let Some(debug_loclists) = self.debug_loclists {
+            out.write_u32(proj(debug_loclists))?;
+        }
+        if let Some(debug_rnglists) = self.debug_rnglists {
+            out.write_u32(proj(debug_rnglists))?;
         }
         if let Some(debug_str_offsets) = self.debug_str_offsets {
             out.write_u32(proj(debug_str_offsets))?;
