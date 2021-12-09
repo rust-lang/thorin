@@ -28,50 +28,49 @@ use crate::{
     Session,
 };
 
-/// DWARF packages come in pre-standard GNU extension format or DWARF 5 standardized format.
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum PackageFormat {
-    /// GNU's DWARF package file format (preceded standardized version from DWARF 5).
-    ///
-    /// See [specification](https://gcc.gnu.org/wiki/DebugFissionDWP).
-    GnuExtension,
-    /// DWARF 5-standardized package file format.
+pub(crate) trait PackageFormatExt {
+    /// Returns `true` if this `Encoding` would produce to a DWARF 5-standardized package file.
     ///
     /// See Sec 7.3.5 and Appendix F of [DWARF specification](https://dwarfstd.org/doc/DWARF5.pdf).
-    DwarfStd,
+    fn is_std_dwarf_package_format(&self) -> bool;
+
+    /// Returns `true` if this `Encoding` would produce a GNU Extension DWARF package file
+    /// (preceded standardized version from DWARF 5).
+    ///
+    /// See [specification](https://gcc.gnu.org/wiki/DebugFissionDWP).
+    fn is_gnu_extension_dwarf_package_format(&self) -> bool;
+
+    /// Returns index version of DWARF package for this `Encoding`.
+    fn dwarf_package_index_version(&self) -> u16;
+
+    /// Returns `true` if the dwarf package index version provided is compatible with this
+    /// `Encoding`.
+    fn is_compatible_dwarf_package_index_version(&self, index_version: u16) -> bool;
 }
 
-impl PackageFormat {
-    /// Returns the appropriate `PackageFormat` for the given version of DWARF being used.
-    pub(crate) fn from_dwarf_version(version: u16) -> Self {
-        if version >= 5 {
-            PackageFormat::DwarfStd
+impl PackageFormatExt for Encoding {
+    fn is_gnu_extension_dwarf_package_format(&self) -> bool {
+        !self.is_std_dwarf_package_format()
+    }
+
+    fn is_std_dwarf_package_format(&self) -> bool {
+        self.version >= 5
+    }
+
+    fn dwarf_package_index_version(&self) -> u16 {
+        if self.is_gnu_extension_dwarf_package_format() {
+            2
         } else {
-            PackageFormat::GnuExtension
+            5
         }
     }
 
-    /// Returns `true` if the index version provided is compatible with the current format.
-    pub(crate) fn is_compatible_index_version(&self, index_version: u16) -> bool {
-        match *self {
-            PackageFormat::DwarfStd => index_version >= 5,
-            PackageFormat::GnuExtension => index_version == 2,
+    fn is_compatible_dwarf_package_index_version(&self, index_version: u16) -> bool {
+        if self.is_gnu_extension_dwarf_package_format() {
+            index_version == 2
+        } else {
+            index_version >= 5
         }
-    }
-}
-
-impl fmt::Display for PackageFormat {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            PackageFormat::GnuExtension => write!(f, "GNU Extension"),
-            PackageFormat::DwarfStd => write!(f, "DWARF Standard"),
-        }
-    }
-}
-
-impl Default for PackageFormat {
-    fn default() -> Self {
-        PackageFormat::GnuExtension
     }
 }
 
@@ -144,8 +143,6 @@ pub(crate) struct InProgressDwarfPackage<'file> {
     /// Object file being created.
     obj: WritableObject<'file>,
 
-    /// Format of the DWARF package being created.
-    format: PackageFormat,
     /// Endianness of the DWARF package being created.
     endian: RunTimeEndian,
 
@@ -232,7 +229,6 @@ impl<'file> InProgressDwarfPackage<'file> {
     /// files.
     #[tracing::instrument(level = "trace")]
     pub(crate) fn new(
-        format: PackageFormat,
         architecture: object::Architecture,
         endianness: object::Endianness,
     ) -> InProgressDwarfPackage<'file> {
@@ -243,7 +239,6 @@ impl<'file> InProgressDwarfPackage<'file> {
 
         Self {
             obj,
-            format,
             endian,
             string_table,
             debug_cu_index: Default::default(),
@@ -333,7 +328,6 @@ impl<'file> InProgressDwarfPackage<'file> {
         input: &object::File<'input>,
         input_dwarf: &gimli::Dwarf<DwpReader<'input>>,
         encoding: Encoding,
-        format: PackageFormat,
     ) -> Result<Option<Contribution>> {
         // UNWRAP: `dwo_name` has known return value for this section.
         let section_name = gimli::SectionId::DebugStrOffsets.dwo_name().unwrap();
@@ -351,7 +345,7 @@ impl<'file> InProgressDwarfPackage<'file> {
             DebugStrOffsetsBase::default_for_encoding_and_file(encoding, DwarfFileType::Dwo);
 
         // Copy the DWARF 5 header exactly.
-        if format == PackageFormat::DwarfStd {
+        if encoding.is_std_dwarf_package_format() {
             // `DebugStrOffsetsBase` should start from after DWARF 5's header, check that.
             assert!(base.0 != 0);
             let size = base.0.try_into().expect("base offset is larger than a u64");
@@ -423,6 +417,7 @@ impl<'file> InProgressDwarfPackage<'file> {
     fn append_unit<'input, 'session: 'input, CuOp, Sect, TuOp>(
         &mut self,
         sess: &'session impl Session<RelocationMap>,
+        encoding: Encoding,
         section: &Sect,
         unit: &gimli::Unit<DwpReader<'input>>,
         mut append_cu_contribution: CuOp,
@@ -481,21 +476,18 @@ impl<'file> InProgressDwarfPackage<'file> {
                     return Ok(());
                 }
 
-                let offset = match self.format {
-                    PackageFormat::GnuExtension => offset
+                let offset = if encoding.is_gnu_extension_dwarf_package_format() {
+                    offset
                         .as_debug_types_offset()
                         .expect(
                             "offset from `.debug_types.dwo` section is not a `DebugTypesOffset`",
                         )
-                        .0,
-                    PackageFormat::DwarfStd => {
-                        offset
-                            .as_debug_info_offset()
-                            .expect(
-                                "offset from `.debug_info.dwo` section is not a `DebugInfoOffset`",
-                            )
-                            .0
-                    }
+                        .0
+                } else {
+                    offset
+                        .as_debug_info_offset()
+                        .expect("offset from `.debug_info.dwo` section is not a `DebugInfoOffset`")
+                        .0
                 };
                 let data = section
                     .compressed_data_range(sess, offset.try_into().unwrap(), size)
@@ -503,9 +495,10 @@ impl<'file> InProgressDwarfPackage<'file> {
                     .ok_or(Error::EmptyUnit(type_signature.0))?;
 
                 if !data.is_empty() {
-                    let id = match self.format {
-                        PackageFormat::GnuExtension => self.debug_types.get(&mut self.obj),
-                        PackageFormat::DwarfStd => self.debug_info.get(&mut self.obj),
+                    let id = if encoding.is_gnu_extension_dwarf_package_format() {
+                        self.debug_types.get(&mut self.obj)
+                    } else {
+                        self.debug_info.get(&mut self.obj)
                     };
                     let offset = self.obj.append_section_data(id, data, section.align());
                     let contribution = Contribution { offset: ContributionOffset(offset), size };
@@ -532,20 +525,19 @@ impl<'file> InProgressDwarfPackage<'file> {
         input: &object::File<'input>,
         input_dwarf: &gimli::Dwarf<DwpReader<'input>>,
         encoding: Encoding,
-        format: PackageFormat,
     ) -> Result<()> {
         use gimli::SectionId::*;
 
         // Load index sections (if they exist).
         let cu_index = maybe_load_index_section::<_, gimli::DebugCuIndex<_>, _, _>(
             sess,
-            self.format,
+            encoding,
             self.endian,
             input,
         )?;
         let tu_index = maybe_load_index_section::<_, gimli::DebugTuIndex<_>, _, _>(
             sess,
-            self.format,
+            encoding,
             self.endian,
             input,
         )?;
@@ -563,8 +555,8 @@ impl<'file> InProgressDwarfPackage<'file> {
             .append_section(&input, DebugMacro)
             .map_err(|e| Error::AppendSection(e, ".debug_macro.dwo"))?;
 
-        let (debug_loc, debug_macinfo, debug_loclists, debug_rnglists) = match self.format {
-            PackageFormat::GnuExtension => {
+        let (debug_loc, debug_macinfo, debug_loclists, debug_rnglists) =
+            if encoding.is_gnu_extension_dwarf_package_format() {
                 // Only `.debug_loc.dwo` and `.debug_macinfo.dwo` with the GNU extension.
                 let debug_loc = self
                     .append_section(&input, DebugLoc)
@@ -573,8 +565,7 @@ impl<'file> InProgressDwarfPackage<'file> {
                     .append_section(&input, DebugMacinfo)
                     .map_err(|e| Error::AppendSection(e, ".debug_macinfo.dwo"))?;
                 (debug_loc, debug_macinfo, None, None)
-            }
-            PackageFormat::DwarfStd => {
+            } else {
                 // Only `.debug_loclists.dwo` and `.debug_rnglists.dwo` with DWARF 5.
                 let debug_loclists = self
                     .append_section(&input, DebugLocLists)
@@ -583,13 +574,11 @@ impl<'file> InProgressDwarfPackage<'file> {
                     .append_section(&input, DebugRngLists)
                     .map_err(|e| Error::AppendSection(e, ".debug_rnglists.dwo"))?;
                 (None, None, debug_loclists, debug_rnglists)
-            }
-        };
+            };
 
         // Concatenate string offsets from the DWARF object into the `.debug_str_offsets` section
         // in the output, rewriting offsets to be based on the new, merged string table.
-        let debug_str_offsets =
-            self.append_str_offsets(sess, &input, &input_dwarf, encoding, format)?;
+        let debug_str_offsets = self.append_str_offsets(sess, &input, &input_dwarf, encoding)?;
 
         // Create offset adjustor functions, see comment on `create_contribution_adjustor` for
         // explanation.
@@ -633,6 +622,7 @@ impl<'file> InProgressDwarfPackage<'file> {
             let unit = input_dwarf.unit(header).map_err(Error::ParseUnit)?;
             self.append_unit(
                 sess,
+                encoding,
                 &debug_info_section,
                 &unit,
                 |this, dwo_id, debug_info| {
@@ -647,6 +637,7 @@ impl<'file> InProgressDwarfPackage<'file> {
                     let debug_macro = macro_cu_adjustor(dwo_id, debug_macro)?;
 
                     this.cu_index_entries.push(CuIndexEntry {
+                        encoding,
                         dwo_id,
                         debug_info,
                         debug_abbrev,
@@ -669,6 +660,7 @@ impl<'file> InProgressDwarfPackage<'file> {
                     let debug_str_offsets = str_offsets_tu_adjustor(type_sig, debug_str_offsets)?;
 
                     this.tu_index_entries.push(TuIndexEntry {
+                        encoding,
                         type_signature: type_sig,
                         debug_info_or_types: debug_info,
                         debug_abbrev,
@@ -683,7 +675,7 @@ impl<'file> InProgressDwarfPackage<'file> {
         }
 
         // Append type units from `.debug_info` with the GNU extension.
-        if self.format == PackageFormat::GnuExtension {
+        if encoding.is_gnu_extension_dwarf_package_format() {
             // UNWRAP: `dwo_name` has known return value for this section.
             let debug_types_name = gimli::SectionId::DebugTypes.dwo_name().unwrap();
             if let Some(debug_types_section) = input.section_by_name(debug_types_name) {
@@ -692,6 +684,7 @@ impl<'file> InProgressDwarfPackage<'file> {
                     let unit = input_dwarf.unit(header).map_err(Error::ParseUnit)?;
                     self.append_unit(
                         sess,
+                        encoding,
                         &debug_types_section,
                         &unit,
                         |_, _, _| {
@@ -708,6 +701,7 @@ impl<'file> InProgressDwarfPackage<'file> {
                                 str_offsets_tu_adjustor(type_sig, debug_str_offsets)?;
 
                             this.tu_index_entries.push(TuIndexEntry {
+                                encoding,
                                 type_signature: type_sig,
                                 debug_info_or_types,
                                 debug_abbrev,
@@ -732,13 +726,9 @@ impl<'file> InProgressDwarfPackage<'file> {
 
         // Write `.debug_{cu,tu}_index` sections to the object.
         debug!("writing cu index");
-        self.cu_index_entries
-            .write_index(self.endian, self.format, &mut self.obj, &mut self.debug_cu_index)
-            .map_err(Error::WriteCuIndex)?;
+        self.cu_index_entries.write_index(self.endian, &mut self.obj, &mut self.debug_cu_index)?;
         debug!("writing tu index");
-        self.tu_index_entries
-            .write_index(self.endian, self.format, &mut self.obj, &mut self.debug_tu_index)
-            .map_err(Error::WriteTuIndex)?;
+        self.tu_index_entries.write_index(self.endian, &mut self.obj, &mut self.debug_tu_index)?;
 
         Ok(self.obj)
     }
@@ -746,6 +736,6 @@ impl<'file> InProgressDwarfPackage<'file> {
 
 impl<'file> fmt::Debug for InProgressDwarfPackage<'file> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "InProgressDwarfPackage({})", self.format)
+        write!(f, "InProgressDwarfPackage")
     }
 }
