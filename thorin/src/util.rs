@@ -219,28 +219,48 @@ where
 /// **Earlier DWARF versions with GNU extension:**
 ///
 /// - `DW_AT_GNU_dwo_id` attribute of the DIE contains the `DwoId`.
-#[tracing::instrument(level = "trace", skip(unit))]
+#[tracing::instrument(level = "trace", skip(debug_abbrev, header))]
 pub(crate) fn dwo_identifier_of_unit<R: gimli::Reader>(
-    unit: &gimli::Unit<R>,
-) -> Option<DwarfObjectIdentifier> {
-    match unit.header.type_() {
+    debug_abbrev: &gimli::DebugAbbrev<R>,
+    header: &gimli::UnitHeader<R>,
+) -> Result<Option<DwarfObjectIdentifier>> {
+    match header.type_() {
         // Compilation units with DWARF 5
         UnitType::Skeleton(dwo_id) | UnitType::SplitCompilation(dwo_id) => {
-            Some(DwarfObjectIdentifier::Compilation(dwo_id.into()))
+            Ok(Some(DwarfObjectIdentifier::Compilation(dwo_id.into())))
         }
         // Compilation units with GNU Extension
         UnitType::Compilation => {
-            unit.dwo_id.map(|id| DwarfObjectIdentifier::Compilation(id.into()))
+            let abbreviations =
+                header.abbreviations(&debug_abbrev).map_err(Error::ParseUnitAbbreviations)?;
+            let mut cursor = header.entries(&abbreviations);
+            cursor.next_dfs()?;
+            let root = cursor.current().expect("unit without root debugging information entry");
+            match root.tag() {
+                gimli::DW_TAG_compile_unit | gimli::DW_TAG_type_unit => (),
+                _ => return Err(Error::TopLevelDieNotUnit),
+            }
+            let mut attrs = root.attrs();
+            while let Some(attr) = attrs.next().map_err(Error::ParseUnitAttribute)? {
+                match (attr.name(), attr.value()) {
+                    (gimli::constants::DW_AT_GNU_dwo_id, gimli::AttributeValue::DwoId(dwo_id)) => {
+                        return Ok(Some(DwarfObjectIdentifier::Compilation(dwo_id.into())))
+                    }
+                    _ => (),
+                }
+            }
+
+            Ok(None)
         }
         // Type units with DWARF 5
         UnitType::SplitType { type_signature, .. } => {
-            Some(DwarfObjectIdentifier::Type(type_signature.into()))
+            Ok(Some(DwarfObjectIdentifier::Type(type_signature.into())))
         }
         // Type units with GNU extension
         UnitType::Type { type_signature, .. } => {
-            Some(DwarfObjectIdentifier::Type(type_signature.into()))
+            Ok(Some(DwarfObjectIdentifier::Type(type_signature.into())))
         }
         // Wrong compilation unit type.
-        _ => None,
+        _ => Ok(None),
     }
 }
