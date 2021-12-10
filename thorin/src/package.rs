@@ -322,14 +322,15 @@ impl<'file> InProgressDwarfPackage<'file> {
     /// target `DwarfObjectIdentifier`.
     #[tracing::instrument(
         level = "trace",
-        skip(sess, section, unit, append_cu_contribution, append_tu_contribution)
+        skip(sess, section, debug_abbrev, header, append_cu_contribution, append_tu_contribution)
     )]
     fn append_unit<'input, 'session: 'input, CuOp, Sect, TuOp>(
         &mut self,
         sess: &'session impl Session<RelocationMap>,
         encoding: Encoding,
         section: &Sect,
-        unit: &gimli::Unit<DwpReader<'input>>,
+        debug_abbrev: &gimli::DebugAbbrev<DwpReader<'input>>,
+        header: &gimli::UnitHeader<DwpReader<'input>>,
         mut append_cu_contribution: CuOp,
         mut append_tu_contribution: TuOp,
     ) -> Result<()>
@@ -338,15 +339,12 @@ impl<'file> InProgressDwarfPackage<'file> {
         TuOp: FnMut(&mut Self, DebugTypeSignature, Contribution) -> Result<()>,
         Sect: CompressedDataRangeExt<'input, 'session>,
     {
-        let size: u64 = unit
-            .header
-            .length_including_self()
-            .try_into()
-            .expect("unit header length bigger than u64");
-        let offset = unit.header.offset();
+        let size: u64 =
+            header.length_including_self().try_into().expect("unit header length bigger than u64");
+        let offset = header.offset();
 
-        let identifier = dwo_identifier_of_unit(&unit);
-        match (unit.header.type_(), identifier) {
+        let identifier = dwo_identifier_of_unit(&debug_abbrev, &header)?;
+        match (header.type_(), identifier) {
             (
                 UnitType::Compilation | UnitType::SplitCompilation(..),
                 Some(DwarfObjectIdentifier::Compilation(dwo_id)),
@@ -550,12 +548,12 @@ impl<'file> InProgressDwarfPackage<'file> {
         // Append compilation (and type units, in DWARF 5) from `.debug_info`.
         let mut iter = input_dwarf.units();
         while let Some(header) = iter.next().map_err(Error::ParseUnitHeader)? {
-            let unit = input_dwarf.unit(header).map_err(Error::ParseUnit)?;
             self.append_unit(
                 sess,
                 encoding,
                 &debug_info_section,
-                &unit,
+                &input_dwarf.debug_abbrev,
+                &header,
                 |this, dwo_id, debug_info| {
                     let debug_abbrev = abbrev_cu_adjustor(dwo_id, Some(debug_abbrev))?
                         .expect("mandatory section cannot be adjusted");
@@ -612,12 +610,12 @@ impl<'file> InProgressDwarfPackage<'file> {
             if let Some(debug_types_section) = input.section_by_name(debug_types_name) {
                 let mut iter = input_dwarf.type_units();
                 while let Some(header) = iter.next().map_err(Error::ParseUnitHeader)? {
-                    let unit = input_dwarf.unit(header).map_err(Error::ParseUnit)?;
                     self.append_unit(
                         sess,
                         encoding,
                         &debug_types_section,
-                        &unit,
+                        &input_dwarf.debug_abbrev,
+                        &header,
                         |_, _, _| {
                             /* no-op, no compilation units in `.debug_types` */
                             Ok(())

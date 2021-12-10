@@ -46,8 +46,14 @@ pub enum Error {
     /// Input object that has a `DwoId` (or `DebugTypeSignature`) does not have a
     /// `DW_AT_GNU_dwo_name` or `DW_AT_dwo_name` attribute.
     MissingDwoName(u64),
+    /// Top-level debugging information entry is not a compilation/type unit.
+    TopLevelDieNotUnit,
     /// Section required of input DWARF objects was missing.
     MissingRequiredSection(&'static str),
+    /// Failed to parse unit abbreviations.
+    ParseUnitAbbreviations(gimli::read::Error),
+    /// Failed to parse unit attribute.
+    ParseUnitAttribute(gimli::read::Error),
     /// Failed to parse unit header.
     ParseUnitHeader(gimli::read::Error),
     /// Failed to parse unit.
@@ -113,7 +119,10 @@ impl StdError for Error {
             Error::MultipleRelocations(_, _) => None,
             Error::UnsupportedRelocation(_, _) => None,
             Error::MissingDwoName(_) => None,
+            Error::TopLevelDieNotUnit => None,
             Error::MissingRequiredSection(_) => None,
+            Error::ParseUnitAbbreviations(source) => Some(source.as_dyn_error()),
+            Error::ParseUnitAttribute(source) => Some(source.as_dyn_error()),
             Error::ParseUnitHeader(source) => Some(source.as_dyn_error()),
             Error::ParseUnit(source) => Some(source.as_dyn_error()),
             Error::IncompatibleIndexVersion(_, _, _) => None,
@@ -171,9 +180,14 @@ impl fmt::Display for Error {
             Error::MissingDwoName(id) => {
                 write!(f, "Missing path attribute to DWARF object 0x{:08x}", id)
             }
+            Error::TopLevelDieNotUnit => {
+                write!(f, "Top-level debugging information entry is not a compilation/type unit")
+            }
             Error::MissingRequiredSection(section) => {
                 write!(f, "Input DWARF object missing required section `{}`", section)
             }
+            Error::ParseUnitAbbreviations(_) => write!(f, "Failed to parse unit abbreviations"),
+            Error::ParseUnitAttribute(_) => write!(f, "Failed to parse unit attribute"),
             Error::ParseUnitHeader(_) => write!(f, "Failed to parse unit header"),
             Error::ParseUnit(_) => write!(f, "Failed to parse unit"),
             Error::IncompatibleIndexVersion(section, format, actual) => {

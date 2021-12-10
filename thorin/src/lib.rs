@@ -199,7 +199,7 @@ where
         while let Some(header) = iter.next().map_err(Error::ParseUnitHeader)? {
             let unit = dwarf.unit(header).map_err(Error::ParseUnit)?;
 
-            let target = match dwo_identifier_of_unit(&unit) {
+            let target = match dwo_identifier_of_unit(&dwarf.debug_abbrev, &unit.header)? {
                 Some(target) => target,
                 None => continue,
             };
