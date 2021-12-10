@@ -1,13 +1,9 @@
 use gimli::{Encoding, EndianSlice, RunTimeEndian, UnitIndex, UnitType};
-use object::{
-    write::{Object as WritableObject, SectionId},
-    Endianness, Object, ObjectSection, SectionKind,
-};
+use object::{Endianness, Object, ObjectSection};
 
 use crate::{
     error::{Error, Result},
     index::{Bucketable, Contribution, ContributionOffset},
-    marker::HasGimliId,
     package::{DwarfObjectIdentifier, PackageFormatExt},
     relocate::RelocationMap,
     Session,
@@ -29,35 +25,6 @@ pub(crate) fn runtime_endian_from_endianness(endianness: Endianness) -> RunTimeE
     match endianness {
         Endianness::Little => RunTimeEndian::Little,
         Endianness::Big => RunTimeEndian::Big,
-    }
-}
-
-/// Wrapper around `Option<SectionId>` for creating the `SectionId` on first access (if it does
-/// not exist).
-#[derive(Default)]
-pub(crate) struct LazySectionId<Id: HasGimliId> {
-    id: Option<SectionId>,
-    _id: std::marker::PhantomData<Id>,
-}
-
-impl<Id: HasGimliId> LazySectionId<Id> {
-    /// Return the `SectionId` for the current section, creating it if it does not exist.
-    ///
-    /// Don't call this function if the returned id isn't going to be used, otherwise an empty
-    /// section would be created.
-    pub(crate) fn get<'file>(&mut self, obj: &mut WritableObject<'file>) -> SectionId {
-        match self.id {
-            Some(id) => id,
-            None => {
-                let id = obj.add_section(
-                    Vec::new(),
-                    dwo_name(Id::gimli_id()).as_bytes().to_vec(),
-                    SectionKind::Debug,
-                );
-                self.id = Some(id);
-                id
-            }
-        }
     }
 }
 
@@ -197,16 +164,15 @@ where
 /// This function returns a "contribution adjustor" closure, which adjusts the contribution's
 /// offset and size according to its contribution in the input's index and with an offset
 /// accumulated over all calls to the closure.
-pub(crate) fn create_contribution_adjustor<'input, Identifier, Target, R: 'input>(
+pub(crate) fn create_contribution_adjustor<'input, Identifier, R: 'input>(
     index: Option<&'input UnitIndex<R>>,
+    target_section_id: gimli::SectionId,
 ) -> Box<dyn FnMut(Identifier, Option<Contribution>) -> Result<Option<Contribution>> + 'input>
 where
     Identifier: Bucketable,
-    Target: HasGimliId,
     R: gimli::Reader,
 {
     let mut adjustment = 0;
-    let target_gimli_id = Target::gimli_id();
 
     Box::new(
         move |identifier: Identifier,
@@ -220,7 +186,7 @@ where
                     let section = index
                         .sections(row_id)
                         .map_err(|e| Error::RowNotInIndex(e, row_id))?
-                        .find(|index_section| index_section.section == target_gimli_id)
+                        .find(|index_section| index_section.section == target_section_id)
                         .ok_or(Error::SectionNotInRow)?;
                     let adjusted_offset: u64 = contribution.offset.0 + adjustment;
                     adjustment += section.size as u64;

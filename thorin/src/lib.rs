@@ -21,7 +21,6 @@ use crate::{
 
 mod error;
 mod index;
-mod marker;
 mod package;
 mod relocate;
 mod strings;

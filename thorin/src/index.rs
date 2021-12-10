@@ -4,14 +4,11 @@ use gimli::{
     write::{EndianVec, Writer},
     Encoding,
 };
-use object::write::Object;
 use tracing::{debug, trace};
 
 use crate::{
     error::{Error, Result},
-    marker::HasGimliId,
     package::{DebugTypeSignature, DwoId, PackageFormatExt},
-    util::LazySectionId,
 };
 
 /// Helper trait for types that can be used in creating the `.debug_{cu,tu}_index` hash table.
@@ -333,34 +330,23 @@ impl IndexEntry for CuIndexEntry {
 
 pub(crate) trait IndexCollection<Entry: IndexEntry> {
     /// Write `.debug_{cu,tu}_index` to the output object.
-    fn write_index<'output, Endian, Id>(
+    fn write_index<'output, Endian: gimli::Endianity>(
         &self,
         endianness: Endian,
-        output: &mut Object<'output>,
-        output_id: &mut LazySectionId<Id>,
-    ) -> Result<()>
-    where
-        Endian: gimli::Endianity,
-        Id: HasGimliId;
+    ) -> Result<EndianVec<Endian>>;
 }
 
 impl<Entry: IndexEntry + fmt::Debug> IndexCollection<Entry> for Vec<Entry> {
-    #[tracing::instrument(level = "trace", skip(output, output_id))]
-    fn write_index<'output, Endian, Id>(
+    #[tracing::instrument(level = "trace")]
+    fn write_index<'output, Endian: gimli::Endianity>(
         &self,
         endianness: Endian,
-        output: &mut Object<'output>,
-        output_id: &mut LazySectionId<Id>,
-    ) -> Result<()>
-    where
-        Endian: gimli::Endianity,
-        Id: HasGimliId,
-    {
-        if self.len() == 0 {
-            return Ok(());
-        }
-
+    ) -> Result<EndianVec<Endian>> {
         let mut out = EndianVec::new(endianness);
+
+        if self.len() == 0 {
+            return Ok(out);
+        }
 
         let buckets = bucket(self);
         debug!(?buckets);
@@ -425,9 +411,6 @@ impl<Entry: IndexEntry + fmt::Debug> IndexCollection<Entry> for Vec<Entry> {
             entry.write_contribution(&mut out, write_size)?;
         }
 
-        // FIXME: use the correct alignment here
-        let output_id = output_id.get(output);
-        let _ = output.append_section_data(output_id, out.slice(), 1);
-        Ok(())
+        Ok(out)
     }
 }
