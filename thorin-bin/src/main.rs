@@ -149,6 +149,11 @@ fn main() -> Result<()> {
     let sess = Session::default();
     let mut package = thorin::DwarfPackage::new(&sess);
 
+    // Return early if there isn't any input.
+    if opt.inputs.is_empty() && opt.executables.is_none() {
+        return Ok(());
+    }
+
     for input in opt.inputs {
         package.add_input_object(&input).context(Error::AddInputObject)?;
     }
