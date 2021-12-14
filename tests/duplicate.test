@@ -1,0 +1,35 @@
+RUN: not thorin %p/inputs/duplicate-c.dwo %p/inputs/duplicate-c.dwo -o %t 2>&1 \
+RUN:   | FileCheck --check-prefix=DWOS %s
+
+RUN: not thorin %p/inputs/duplicate-ac.dwp %p/inputs/duplicate-c.dwo -o %t 2>&1 \
+RUN:   | FileCheck --check-prefix=1DWP %s
+
+RUN: not thorin %p/inputs/duplicate-c.dwo %p/inputs/duplicate-bc.dwp -o %t 2>&1 \
+RUN:   | FileCheck --check-prefix=2DWP %s
+
+RUN: not thorin %p/inputs/duplicate-dwo-name-c.dwo %p/inputs/duplicate-dwo-name-c.dwo -o %t 2>&1 \
+RUN:   | FileCheck --check-prefix=DWODWOS %s
+
+RUN: not thorin %p/inputs/duplicate-dwo-name-ac.dwp %p/inputs/duplicate-dwo-name-c.dwo -o %t 2>&1 \
+RUN:   | FileCheck --check-prefix=DWO1DWP %s
+
+RUN: not thorin %p/inputs/duplicate-dwo-name-c.dwo %p/inputs/duplicate-dwo-name-bc.dwp -o %t 2>&1 \
+RUN:   | FileCheck --check-prefix=DWO2DWP %s
+
+DWOS: Error: Failed to add input object to DWARF package
+DWOS:  Found duplicate split compilation unit ({{.*}})
+
+1DWP: Error: Failed to add input object to DWARF package
+1DWP:  Found duplicate split compilation unit ({{.*}})
+
+2DWP: Error: Failed to add input object to DWARF package
+2DWP:  Found duplicate split compilation unit ({{.*}})
+
+DWODWOS: Error: Failed to add input object to DWARF package
+DWODWOS:  Found duplicate split compilation unit ({{.*}})
+
+DWO1DWP: Error: Failed to add input object to DWARF package
+DWO1DWP:  Found duplicate split compilation unit ({{.*}})
+
+DWO2DWP: Error: Failed to add input object to DWARF package
+DWO2DWP:  Found duplicate split compilation unit ({{.*}})

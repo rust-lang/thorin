@@ -1,0 +1,9 @@
+RUN: thorin %p/inputs/gcc-type.dwo -o - | llvm-dwarfdump -v - | FileCheck %s
+RUN: not thorin %p/inputs/gcc-type.dwo %p/inputs/gcc-type.dwo -o %t 2>&1 | FileCheck --check-prefix=DUP %s
+
+CHECK: Type Unit
+CHECK: Type Unit
+
+// Check that thorin can parse DW_FORM_string for CU name
+DUP: Error: Failed to add input object to DWARF package
+DUP:  Found duplicate split compilation unit ({{.*}})

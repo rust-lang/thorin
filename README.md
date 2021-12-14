@@ -39,6 +39,21 @@ If you want help or mentorship, reach out to us in a GitHub issue, or ask `david
 $ cargo build
 ```
 
+To run the tests, first install the relevant dependencies:
+
+```shell-session
+$ pip install lit
+$ wget clang+llvm-13.0.0-x86_64-linux-gnu-ubuntu-20.04.tar.xz -O llvm.tar.xz # (you might want to update or change architecture)
+$ tar xvf llvm.tar.xz
+```
+
+Next, run the `lit` testsuite, replacing `$LLVM` with the path to the extracted LLVM.
+
+```shell-session
+$ cargo build
+$ lit -v --path $PWD/target/debug/ --path $LLVM/build/bin/ ./tests
+```
+
 We use `rustfmt` to automatically format and style all of our code. To install and use `rustfmt`:
 
 ```shell-session
