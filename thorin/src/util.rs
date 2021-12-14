@@ -9,17 +9,6 @@ use crate::{
     Session,
 };
 
-/// Helper function to return the name of a section in a dwarf object.
-///
-/// Unnecessary but works around a bug in Gimli.
-pub(crate) fn dwo_name(id: gimli::SectionId) -> &'static str {
-    match id {
-        // TODO: patch gimli to return this
-        gimli::SectionId::DebugMacinfo => ".debug_macinfo.dwo",
-        _ => id.dwo_name().unwrap(),
-    }
-}
-
 /// Returns the gimli `RunTimeEndian` corresponding to a object `Endianness`.
 pub(crate) fn runtime_endian_from_endianness(endianness: Endianness) -> RunTimeEndian {
     match endianness {

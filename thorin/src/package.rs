@@ -1,21 +1,21 @@
 use std::{collections::HashSet, fmt};
 
-use gimli::{Encoding, RunTimeEndian, UnitType};
+use gimli::{Encoding, RunTimeEndian, UnitHeader};
 use object::{
     write::{Object as WritableObject, SectionId},
     BinaryFormat, Object, ObjectSection, SectionKind,
 };
-use tracing::{debug, trace};
+use tracing::debug;
 
 use crate::{
     error::{Error, Result},
     index::{
         Bucketable, Contribution, ContributionOffset, CuIndexEntry, IndexCollection, TuIndexEntry,
     },
-    relocate::{DwpReader, RelocationMap},
+    relocate::RelocationMap,
     strings::PackageStringTable,
     util::{
-        create_contribution_adjustor, dwo_identifier_of_unit, dwo_name, maybe_load_index_section,
+        create_contribution_adjustor, dwo_identifier_of_unit, maybe_load_index_section,
         runtime_endian_from_endianness, CompressedDataRangeExt,
     },
     Session,
@@ -131,9 +131,24 @@ impl Bucketable for DwarfObjectIdentifier {
     }
 }
 
+enum UnitHeaderIterator<R: gimli::Reader> {
+    DebugInfo(gimli::read::DebugInfoUnitHeadersIter<R>),
+    DebugTypes(gimli::read::DebugTypesUnitHeadersIter<R>),
+}
+
+impl<R: gimli::Reader> UnitHeaderIterator<R> {
+    fn next(&mut self) -> gimli::read::Result<Option<UnitHeader<R>>> {
+        match self {
+            UnitHeaderIterator::DebugInfo(iter) => iter.next(),
+            UnitHeaderIterator::DebugTypes(iter) => iter.next(),
+        }
+    }
+}
+
 struct DwarfPackageObject<'file> {
     /// Object file being created.
     obj: WritableObject<'file>,
+
     /// Identifier for output `.debug_cu_index.dwo` section.
     debug_cu_index: Option<SectionId>,
     /// `.debug_tu_index.dwo`
@@ -202,7 +217,6 @@ impl<'file> DwarfPackageObject<'file> {
         endianness: object::Endianness,
     ) -> DwarfPackageObject<'file> {
         let obj = WritableObject::new(BinaryFormat::Elf, architecture, endianness);
-
         Self {
             obj,
             debug_cu_index: Default::default(),
@@ -249,8 +263,9 @@ pub(crate) struct InProgressDwarfPackage<'file> {
 
     /// Object file being created.
     obj: DwarfPackageObject<'file>,
-    /// In-progress string table being accumulated. Used to write final `.debug_str.dwo` and
-    /// `.debug_str_offsets.dwo` for each DWARF object.
+    /// In-progress string table being accumulated.
+    ///
+    /// Used to write final `.debug_str.dwo` and `.debug_str_offsets.dwo`.
     string_table: PackageStringTable<RunTimeEndian>,
 
     /// Compilation unit index entries (offsets + sizes) being accumulated.
@@ -275,163 +290,32 @@ impl<'file> InProgressDwarfPackage<'file> {
         architecture: object::Architecture,
         endianness: object::Endianness,
     ) -> InProgressDwarfPackage<'file> {
-        let obj = DwarfPackageObject::new(architecture, endianness);
-
         let endian = runtime_endian_from_endianness(endianness);
-        let string_table = PackageStringTable::new(endian);
-
         Self {
-            obj,
             endian,
-            string_table,
+
+            obj: DwarfPackageObject::new(architecture, endianness),
+            string_table: PackageStringTable::new(endian),
+
             cu_index_entries: Default::default(),
             tu_index_entries: Default::default(),
             contained_units: Default::default(),
         }
     }
 
-    /// Returns the units contained within this in-progress DWARF package.
     pub(crate) fn contained_units(&self) -> &HashSet<DwarfObjectIdentifier> {
         &self.contained_units
     }
 
-    /// Return the contents of a section from the input DWARF object.
-    #[tracing::instrument(level = "trace", skip(sess, input))]
-    fn section_data<'input, 'session: 'input>(
-        &mut self,
-        sess: &'session impl Session<RelocationMap>,
-        input: &object::File<'input>,
-        input_id: gimli::SectionId,
-    ) -> object::Result<Option<&'input [u8]>> {
-        let name = dwo_name(input_id);
-        match input.section_by_name(name) {
-            Some(section) => {
-                let data = section.compressed_data()?.decompress()?;
-                let data_ref = sess.alloc_owned_cow(data);
-                Ok(Some(data_ref))
-            }
-            None => {
-                trace!("section doesn't exist");
-                Ok(None)
-            }
-        }
-    }
-
-    /// Append a unit from the input DWARF object to the `.debug_info` (or `.debug_types`) section
-    /// in the output object. Only appends unit if it has a `DwarfObjectIdentifier` matching the
-    /// target `DwarfObjectIdentifier`.
-    #[tracing::instrument(
-        level = "trace",
-        skip(sess, section, debug_abbrev, header, append_cu_contribution, append_tu_contribution)
-    )]
-    fn append_unit<'input, 'session: 'input, CuOp, Sect, TuOp>(
-        &mut self,
-        sess: &'session impl Session<RelocationMap>,
-        encoding: Encoding,
-        section: &Sect,
-        debug_abbrev: &gimli::DebugAbbrev<DwpReader<'input>>,
-        header: &gimli::UnitHeader<DwpReader<'input>>,
-        mut append_cu_contribution: CuOp,
-        mut append_tu_contribution: TuOp,
-    ) -> Result<()>
-    where
-        CuOp: FnMut(&mut Self, DwoId, Contribution) -> Result<()>,
-        TuOp: FnMut(&mut Self, DebugTypeSignature, Contribution) -> Result<()>,
-        Sect: CompressedDataRangeExt<'input, 'session>,
-    {
-        let size: u64 =
-            header.length_including_self().try_into().expect("unit header length bigger than u64");
-        let offset = header.offset();
-
-        let identifier = dwo_identifier_of_unit(&debug_abbrev, &header)?;
-        match (header.type_(), identifier) {
-            (
-                UnitType::Compilation | UnitType::SplitCompilation(..),
-                Some(DwarfObjectIdentifier::Compilation(dwo_id)),
-            ) => {
-                debug!(?dwo_id, "compilation unit");
-                if self.contained_units.contains(&DwarfObjectIdentifier::Compilation(dwo_id)) {
-                    return Err(Error::DuplicateUnit(dwo_id.0));
-                }
-
-                let offset = offset
-                    .as_debug_info_offset()
-                    .expect("offset from `.debug_info.dwo` section is not a `DebugInfoOffset`")
-                    .0;
-                let data = section
-                    .compressed_data_range(sess, offset.try_into().unwrap(), size)
-                    .map_err(Error::DecompressData)?
-                    .ok_or(Error::EmptyUnit(dwo_id.0))?;
-
-                if !data.is_empty() {
-                    let contribution = self.obj.append_to_debug_info(data).unwrap();
-                    append_cu_contribution(self, dwo_id, contribution)?;
-                    self.contained_units.insert(DwarfObjectIdentifier::Compilation(dwo_id));
-                }
-
-                Ok(())
-            }
-            (
-                UnitType::Type { .. } | UnitType::SplitType { .. },
-                Some(DwarfObjectIdentifier::Type(type_signature)),
-            ) => {
-                debug!(?type_signature, "type unit");
-                if self.contained_units.contains(&DwarfObjectIdentifier::Type(type_signature)) {
-                    // Return early if a unit with this type signature has already been seen.
-                    debug!(?type_signature, "skipping, already seen");
-                    return Ok(());
-                }
-
-                let offset = if encoding.is_gnu_extension_dwarf_package_format() {
-                    offset
-                        .as_debug_types_offset()
-                        .expect(
-                            "offset from `.debug_types.dwo` section is not a `DebugTypesOffset`",
-                        )
-                        .0
-                } else {
-                    offset
-                        .as_debug_info_offset()
-                        .expect("offset from `.debug_info.dwo` section is not a `DebugInfoOffset`")
-                        .0
-                };
-                let data = section
-                    .compressed_data_range(sess, offset.try_into().unwrap(), size)
-                    .map_err(Error::DecompressData)?
-                    .ok_or(Error::EmptyUnit(type_signature.0))?;
-
-                if !data.is_empty() {
-                    let contribution = if encoding.is_gnu_extension_dwarf_package_format() {
-                        self.obj.append_to_debug_types(data).unwrap()
-                    } else {
-                        self.obj.append_to_debug_info(data).unwrap()
-                    };
-                    append_tu_contribution(self, type_signature, contribution)?;
-                    self.contained_units.insert(DwarfObjectIdentifier::Type(type_signature));
-                }
-
-                Ok(())
-            }
-            (_, Some(..)) => {
-                debug!("unit in dwarf object is not a split unit, skipping");
-                Ok(())
-            }
-            (_, None) => Ok(()),
-        }
-    }
-
     /// Process a DWARF object. Copies relevant sections, compilation/type units and strings from
     /// DWARF object into output object.
-    #[tracing::instrument(level = "trace", skip(sess, input, input_dwarf))]
-    pub(crate) fn append_dwarf_object<'input, 'session: 'input>(
+    #[tracing::instrument(level = "trace", skip(sess, input,))]
+    pub(crate) fn add_input_object<'input, 'session: 'input>(
         &mut self,
         sess: &'session impl Session<RelocationMap>,
         input: &object::File<'input>,
-        input_dwarf: &gimli::Dwarf<DwpReader<'input>>,
         encoding: Encoding,
     ) -> Result<()> {
-        use gimli::SectionId::*;
-
         // Load index sections (if they exist).
         let cu_index = maybe_load_index_section::<_, gimli::DebugCuIndex<_>, _, _>(
             sess,
@@ -446,68 +330,98 @@ impl<'file> InProgressDwarfPackage<'file> {
             input,
         )?;
 
-        // Concatenate contents of sections from the DWARF object into the corresponding section in
-        // the output.
-        let debug_abbrev = self
-            .section_data(sess, &input, DebugAbbrev)?
-            .and_then(|data| self.obj.append_to_debug_abbrev(data))
-            .ok_or(Error::MissingRequiredSection(".debug_abbrev.dwo"))?;
-        let debug_line = self
-            .section_data(sess, &input, DebugLine)?
-            .and_then(|data| self.obj.append_to_debug_line(data));
-        let debug_macro = self
-            .section_data(sess, &input, DebugMacro)?
-            .and_then(|data| self.obj.append_to_debug_macro(data));
+        let mut debug_abbrev = None;
+        let mut debug_line = None;
+        let mut debug_loc = None;
+        let mut debug_loclists = None;
+        let mut debug_macinfo = None;
+        let mut debug_macro = None;
+        let mut debug_rnglists = None;
+        let mut debug_str_offsets = None;
 
-        let (debug_loc, debug_macinfo, debug_loclists, debug_rnglists) =
-            if encoding.is_gnu_extension_dwarf_package_format() {
-                // Only `.debug_loc.dwo` and `.debug_macinfo.dwo` with the GNU extension.
-                let debug_loc = self
-                    .section_data(sess, &input, DebugLoc)?
-                    .and_then(|data| self.obj.append_to_debug_loc(data));
-                let debug_macinfo = self
-                    .section_data(sess, &input, DebugMacinfo)?
-                    .and_then(|data| self.obj.append_to_debug_macinfo(data));
-                (debug_loc, debug_macinfo, None, None)
-            } else {
-                // Only `.debug_loclists.dwo` and `.debug_rnglists.dwo` with DWARF 5.
-                let debug_loclists = self
-                    .section_data(sess, &input, DebugLocLists)?
-                    .and_then(|data| self.obj.append_to_debug_loclists(data));
-                let debug_rnglists = self
-                    .section_data(sess, &input, DebugRngLists)?
-                    .and_then(|data| self.obj.append_to_debug_rnglists(data));
-                (None, None, debug_loclists, debug_rnglists)
+        macro_rules! update {
+            ($target:ident += $source:expr) => {
+                if let Some(other) = $source {
+                    let contribution = $target.get_or_insert(Contribution { size: 0, ..other });
+                    contribution.size += other.size;
+                }
+                debug!(?$target);
             };
+        }
 
-        // Concatenate string offsets from the DWARF object into the `.debug_str_offsets` section
-        // in the output, rewriting offsets to be based on the new, merged string table.
-        let debug_str_offsets =
-            if let Some(section) = input.section_by_name(".debug_str_offsets.dwo") {
-                let data = section.compressed_data()?.decompress()?;
-                let data_ref = sess.alloc_owned_cow(data);
-                let debug_str_offsets =
-                    gimli::DebugStrOffsets::from(gimli::EndianSlice::new(data_ref, self.endian));
-
-                let debug_str = if let Some(section) = input.section_by_name(".debug_str.dwo") {
+        // Iterate over sections rather than using `section_by_name` because sections can be
+        // repeated.
+        for section in input.sections() {
+            match section.name().unwrap() {
+                ".debug_abbrev.dwo" | ".zdebug_abbrev.dwo" => {
                     let data = section.compressed_data()?.decompress()?;
-                    let data_ref = sess.alloc_owned_cow(data);
-                    gimli::DebugStr::new(data_ref, self.endian)
-                } else {
-                    return Err(Error::MissingRequiredSection(".debug_str.dwo"));
-                };
+                    update!(debug_abbrev += self.obj.append_to_debug_abbrev(&data));
+                }
+                ".debug_line.dwo" | ".zdebug_line.dwo" => {
+                    let data = section.compressed_data()?.decompress()?;
+                    update!(debug_line += self.obj.append_to_debug_line(&data));
+                }
+                ".debug_loc.dwo" | ".zdebug_loc.dwo" => {
+                    let data = section.compressed_data()?.decompress()?;
+                    update!(debug_loc += self.obj.append_to_debug_loc(&data));
+                }
+                ".debug_loclists.dwo" | ".zdebug_loclists.dwo" => {
+                    let data = section.compressed_data()?.decompress()?;
+                    update!(debug_loclists += self.obj.append_to_debug_loclists(&data));
+                }
+                ".debug_macinfo.dwo" | ".zdebug_macinfo.dwo" => {
+                    let data = section.compressed_data()?.decompress()?;
+                    update!(debug_macinfo += self.obj.append_to_debug_macinfo(&data));
+                }
+                ".debug_macro.dwo" | ".zdebug_macro.dwo" => {
+                    let data = section.compressed_data()?.decompress()?;
+                    update!(debug_macro += self.obj.append_to_debug_macro(&data));
+                }
+                ".debug_rnglists.dwo" | ".zdebug_rnglists.dwo" => {
+                    let data = section.compressed_data()?.decompress()?;
+                    update!(debug_rnglists += self.obj.append_to_debug_rnglists(&data));
+                }
+                ".debug_str_offsets.dwo" | ".zdebug_str_offsets.dwo" => {
+                    let debug_str_offsets_section = {
+                        let data = section.compressed_data()?.decompress()?;
+                        let data_ref = sess.alloc_owned_cow(data);
+                        gimli::DebugStrOffsets::from(gimli::EndianSlice::new(data_ref, self.endian))
+                    };
 
-                let debug_str_offsets_data = self.string_table.remap_str_offsets_section(
-                    debug_str,
-                    debug_str_offsets,
-                    section.size(),
-                    self.endian,
-                    encoding,
-                )?;
-                self.obj.append_to_debug_str_offsets(debug_str_offsets_data.slice())
-            } else {
-                None
-            };
+                    let debug_str_section =
+                        if let Some(section) = input.section_by_name(".debug_str.dwo") {
+                            let data = section.compressed_data()?.decompress()?;
+                            let data_ref = sess.alloc_owned_cow(data);
+                            gimli::DebugStr::new(data_ref, self.endian)
+                        } else {
+                            return Err(Error::MissingRequiredSection(".debug_str.dwo"));
+                        };
+
+                    let data = self.string_table.remap_str_offsets_section(
+                        debug_str_section,
+                        debug_str_offsets_section,
+                        section.size(),
+                        self.endian,
+                        encoding,
+                    )?;
+                    update!(
+                        debug_str_offsets += self.obj.append_to_debug_str_offsets(data.slice())
+                    );
+                }
+                _ => (),
+            }
+        }
+
+        // `.debug_abbrev.dwo`'s contribution will already have been processed, but getting the
+        // `DwoId` of a GNU Extension compilation unit requires access to it.
+        let debug_abbrev_section = if let Some(section) = input.section_by_name(".debug_abbrev.dwo")
+        {
+            let data = section.compressed_data()?.decompress()?;
+            let data_ref = sess.alloc_owned_cow(data);
+            gimli::DebugAbbrev::new(data_ref, self.endian)
+        } else {
+            return Err(Error::MissingRequiredSection(".debug_abbrev.dwo"));
+        };
 
         // Create offset adjustor functions, see comment on `create_contribution_adjustor` for
         // explanation.
@@ -539,111 +453,159 @@ impl<'file> InProgressDwarfPackage<'file> {
         let mut str_offsets_tu_adjustor =
             create_contribution_adjustor(tu_index.as_ref(), gimli::SectionId::DebugStrOffsets);
 
-        // UNWRAP: `dwo_name` has known return value for this section.
-        let debug_info_name = gimli::SectionId::DebugInfo.dwo_name().unwrap();
-        let debug_info_section = input
-            .section_by_name(debug_info_name)
-            .ok_or(Error::MissingRequiredSection(".debug_info.dwo"))?;
+        let mut seen_debug_info = false;
+        let mut seen_debug_types = false;
 
-        // Append compilation (and type units, in DWARF 5) from `.debug_info`.
-        let mut iter = input_dwarf.units();
-        while let Some(header) = iter.next().map_err(Error::ParseUnitHeader)? {
-            self.append_unit(
-                sess,
-                encoding,
-                &debug_info_section,
-                &input_dwarf.debug_abbrev,
-                &header,
-                |this, dwo_id, debug_info| {
-                    let debug_abbrev = abbrev_cu_adjustor(dwo_id, Some(debug_abbrev))?
-                        .expect("mandatory section cannot be adjusted");
-                    let debug_line = line_cu_adjustor(dwo_id, debug_line)?;
-                    let debug_loc = loc_cu_adjustor(dwo_id, debug_loc)?;
-                    let debug_loclists = loclists_cu_adjustor(dwo_id, debug_loclists)?;
-                    let debug_rnglists = rnglists_cu_adjustor(dwo_id, debug_rnglists)?;
-                    let debug_str_offsets = str_offsets_cu_adjustor(dwo_id, debug_str_offsets)?;
-                    let debug_macinfo = macinfo_cu_adjustor(dwo_id, debug_macinfo)?;
-                    let debug_macro = macro_cu_adjustor(dwo_id, debug_macro)?;
+        for section in input.sections() {
+            let data = section.compressed_data()?.decompress()?;
+            let (is_debug_types, mut iter) = match section.name().unwrap() {
+                ".debug_info.dwo" | ".zdebug_info.dwo"
+                    // Report an error if a input DWARF package has multiple `.debug_info`
+                    // sections.
+                    if seen_debug_info && cu_index.is_some() =>
+                {
+                    return Err(Error::MultipleDebugInfoSection);
+                }
+                ".debug_info.dwo" | ".zdebug_info.dwo" => {
+                    seen_debug_info = true;
+                    (
+                        false,
+                        UnitHeaderIterator::DebugInfo(
+                            gimli::DebugInfo::new(&data, self.endian).units(),
+                        ),
+                    )
+                }
+                ".debug_types.dwo" | ".zdebug_types.dwo"
+                    // Report an error if a input DWARF package has multiple `.debug_types`
+                    // sections.
+                    if seen_debug_types && tu_index.is_some() =>
+                {
+                    return Err(Error::MultipleDebugTypesSection);
+                }
+                ".debug_types.dwo" | ".zdebug_types.dwo" => {
+                    seen_debug_types = true;
+                    (
+                        true,
+                        UnitHeaderIterator::DebugTypes(
+                            gimli::DebugTypes::new(&data, self.endian).units(),
+                        ),
+                    )
+                }
+                _ => continue,
+            };
 
-                    this.cu_index_entries.push(CuIndexEntry {
-                        encoding,
-                        dwo_id,
-                        debug_info,
-                        debug_abbrev,
-                        debug_line,
-                        debug_loc,
-                        debug_loclists,
-                        debug_rnglists,
-                        debug_str_offsets,
-                        debug_macinfo,
-                        debug_macro,
-                    });
-                    Ok(())
-                },
-                |this, type_sig, debug_info| {
-                    let debug_abbrev = abbrev_tu_adjustor(type_sig, Some(debug_abbrev))?
-                        .expect("mandatory section cannot be adjusted");
-                    let debug_line = line_tu_adjustor(type_sig, debug_line)?;
-                    let debug_loclists = loclists_tu_adjustor(type_sig, debug_loclists)?;
-                    let debug_rnglists = rnglists_tu_adjustor(type_sig, debug_rnglists)?;
-                    let debug_str_offsets = str_offsets_tu_adjustor(type_sig, debug_str_offsets)?;
+            while let Some(header) = iter.next().map_err(Error::ParseUnitHeader)? {
+                let id = match dwo_identifier_of_unit(&debug_abbrev_section, &header)? {
+                    // Report an error if the unit doesn't have a `DwoId` or `DebugTypeSignature`.
+                    None => {
+                        return Err(Error::NotSplitUnit);
+                    }
+                    // Report an error when a duplicate compilation unit is found.
+                    Some(id @ DwarfObjectIdentifier::Compilation(dwo_id))
+                        if self.contained_units.contains(&id) =>
+                    {
+                        return Err(Error::DuplicateUnit(dwo_id.0));
+                    }
+                    // Skip duplicate type units, these happen during proper operation of `thorin`.
+                    Some(id @ DwarfObjectIdentifier::Type(type_sig))
+                        if self.contained_units.contains(&id) =>
+                    {
+                        debug!(?type_sig, "skipping duplicate type unit, already seen");
+                        continue;
+                    }
+                    Some(id) => id,
+                };
 
-                    this.tu_index_entries.push(TuIndexEntry {
-                        encoding,
-                        type_signature: type_sig,
-                        debug_info_or_types: debug_info,
-                        debug_abbrev,
-                        debug_line,
-                        debug_loclists,
-                        debug_rnglists,
-                        debug_str_offsets,
-                    });
-                    Ok(())
-                },
-            )?;
+                let size: u64 = header
+                    .length_including_self()
+                    .try_into()
+                    .expect("unit header length bigger than u64");
+                let offset = match id {
+                    DwarfObjectIdentifier::Type(_) if is_debug_types => {
+                        header
+                            .offset()
+                            .as_debug_types_offset()
+                            .expect("unit w/out debug info offset")
+                            .0
+                    }
+                    DwarfObjectIdentifier::Compilation(_) | DwarfObjectIdentifier::Type(_) => {
+                        header
+                            .offset()
+                            .as_debug_info_offset()
+                            .expect("unit w/out debug info offset")
+                            .0
+                    }
+                };
+
+                let data = section
+                    .compressed_data_range(sess, offset.try_into().unwrap(), size)
+                    .map_err(Error::DecompressData)?
+                    .ok_or(Error::EmptyUnit(id.index()))?;
+
+                match id {
+                    DwarfObjectIdentifier::Compilation(dwo_id) => {
+                        let debug_info =
+                            self.obj.append_to_debug_info(data).expect("no contribution from unit");
+
+                        let debug_abbrev = abbrev_cu_adjustor(dwo_id, debug_abbrev)?
+                            .ok_or(Error::MissingRequiredSection(".debug_abbrev.dwo"))?;
+                        let debug_line = line_cu_adjustor(dwo_id, debug_line)?;
+                        let debug_loc = loc_cu_adjustor(dwo_id, debug_loc)?;
+                        let debug_loclists = loclists_cu_adjustor(dwo_id, debug_loclists)?;
+                        let debug_rnglists = rnglists_cu_adjustor(dwo_id, debug_rnglists)?;
+                        let debug_str_offsets = str_offsets_cu_adjustor(dwo_id, debug_str_offsets)?;
+                        let debug_macinfo = macinfo_cu_adjustor(dwo_id, debug_macinfo)?;
+                        let debug_macro = macro_cu_adjustor(dwo_id, debug_macro)?;
+
+                        self.cu_index_entries.push(CuIndexEntry {
+                            encoding,
+                            dwo_id,
+                            debug_info,
+                            debug_abbrev,
+                            debug_line,
+                            debug_loc,
+                            debug_loclists,
+                            debug_rnglists,
+                            debug_str_offsets,
+                            debug_macinfo,
+                            debug_macro,
+                        });
+                    }
+                    DwarfObjectIdentifier::Type(type_signature) => {
+                        let debug_info_or_types = if is_debug_types {
+                            self.obj.append_to_debug_types(data)
+                        } else {
+                            self.obj.append_to_debug_info(data)
+                        }
+                        .expect("no contribution from unit");
+
+                        let debug_abbrev = abbrev_tu_adjustor(type_signature, debug_abbrev)?
+                            .ok_or(Error::MissingRequiredSection(".debug_abbrev.dwo"))?;
+                        let debug_line = line_tu_adjustor(type_signature, debug_line)?;
+                        let debug_loclists = loclists_tu_adjustor(type_signature, debug_loclists)?;
+                        let debug_rnglists = rnglists_tu_adjustor(type_signature, debug_rnglists)?;
+                        let debug_str_offsets =
+                            str_offsets_tu_adjustor(type_signature, debug_str_offsets)?;
+
+                        self.tu_index_entries.push(TuIndexEntry {
+                            encoding,
+                            type_signature,
+                            debug_info_or_types,
+                            debug_abbrev,
+                            debug_line,
+                            debug_loclists,
+                            debug_rnglists,
+                            debug_str_offsets,
+                        });
+                    }
+                }
+                self.contained_units.insert(id);
+            }
         }
 
-        // Append type units from `.debug_info` with the GNU extension.
-        if encoding.is_gnu_extension_dwarf_package_format() {
-            // UNWRAP: `dwo_name` has known return value for this section.
-            let debug_types_name = gimli::SectionId::DebugTypes.dwo_name().unwrap();
-            if let Some(debug_types_section) = input.section_by_name(debug_types_name) {
-                let mut iter = input_dwarf.type_units();
-                while let Some(header) = iter.next().map_err(Error::ParseUnitHeader)? {
-                    self.append_unit(
-                        sess,
-                        encoding,
-                        &debug_types_section,
-                        &input_dwarf.debug_abbrev,
-                        &header,
-                        |_, _, _| {
-                            /* no-op, no compilation units in `.debug_types` */
-                            Ok(())
-                        },
-                        |this, type_sig, debug_info_or_types| {
-                            let debug_abbrev = abbrev_tu_adjustor(type_sig, Some(debug_abbrev))?
-                                .expect("mandatory section cannot be adjusted");
-                            let debug_line = line_tu_adjustor(type_sig, debug_line)?;
-                            let debug_loclists = loclists_tu_adjustor(type_sig, debug_loclists)?;
-                            let debug_rnglists = rnglists_tu_adjustor(type_sig, debug_rnglists)?;
-                            let debug_str_offsets =
-                                str_offsets_tu_adjustor(type_sig, debug_str_offsets)?;
-
-                            this.tu_index_entries.push(TuIndexEntry {
-                                encoding,
-                                type_signature: type_sig,
-                                debug_info_or_types,
-                                debug_abbrev,
-                                debug_line,
-                                debug_loclists,
-                                debug_rnglists,
-                                debug_str_offsets,
-                            });
-                            Ok(())
-                        },
-                    )?;
-                }
-            }
+        if !seen_debug_info {
+            // Report an error if no `.debug_info` section was found.
+            return Err(Error::MissingRequiredSection(".debug_info.dwo"));
         }
 
         Ok(())

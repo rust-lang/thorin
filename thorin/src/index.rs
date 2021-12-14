@@ -135,6 +135,7 @@ impl IndexEntry for TuIndexEntry {
         self.type_signature.0
     }
 
+    #[tracing::instrument(level = "trace", skip(out))]
     fn write_header<Endian: gimli::Endianity>(&self, out: &mut EndianVec<Endian>) -> Result<()> {
         if self.encoding.is_gnu_extension_dwarf_package_format() {
             out.write_u32(gimli::DW_SECT_V2_TYPES.0)?;
@@ -165,6 +166,7 @@ impl IndexEntry for TuIndexEntry {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip(out, proj))]
     fn write_contribution<Endian, Proj>(
         &self,
         out: &mut EndianVec<Endian>,
@@ -277,6 +279,7 @@ impl IndexEntry for CuIndexEntry {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip(out, proj))]
     fn write_contribution<Endian, Proj>(
         &self,
         out: &mut EndianVec<Endian>,
@@ -351,14 +354,15 @@ impl<Entry: IndexEntry + fmt::Debug> IndexCollection<Entry> for Vec<Entry> {
         let buckets = bucket(self);
         debug!(?buckets);
 
-        let num_columns = self[0].number_of_columns();
-        assert!(self.iter().all(|e| e.number_of_columns() == num_columns));
-        debug!(?num_columns);
         let encoding = self[0].encoding();
         if !self.iter().all(|e| e.encoding() == encoding) {
             return Err(Error::MixedInputEncodings);
         }
         debug!(?encoding);
+
+        let num_columns = self[0].number_of_columns();
+        assert!(self.iter().all(|e| e.number_of_columns() == num_columns));
+        debug!(?num_columns);
 
         // Write header..
         if encoding.is_gnu_extension_dwarf_package_format() {

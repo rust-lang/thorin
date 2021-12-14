@@ -6,9 +6,7 @@ use std::{
 };
 
 use gimli::{EndianSlice, Reader};
-use object::{
-    write::Object as WritableObject, Architecture, Endianness, FileKind, Object, ObjectSection,
-};
+use object::{write::Object as WritableObject, FileKind, Object, ObjectSection};
 use tracing::{debug, trace};
 
 use crate::{
@@ -139,45 +137,33 @@ where
         Self { sess, maybe_in_progress: None, targets: HashSet::new() }
     }
 
-    /// Creating a `InProgressDwarfPackage` requires knowing the format of the package being
-    /// created, its architecture and its endianness - these aren't known when a `DwarfPackage` is
-    /// created, so use this function to access the package, creating it if it hasn't been created
-    /// yet.
-    fn in_progress_package(
-        &mut self,
-        architecture: Architecture,
-        endianness: Endianness,
-    ) -> &mut InProgressDwarfPackage<'output> {
-        if self.maybe_in_progress.is_none() {
-            self.maybe_in_progress = Some(InProgressDwarfPackage::new(architecture, endianness));
-        }
-
-        // EXPECT: in-progress package already exists or was just created
-        self.maybe_in_progress.as_mut().expect("`DwarfPackage::package` is broken")
-    }
-
     /// Add an input object to the in-progress package.
     #[tracing::instrument(level = "trace", skip(obj))]
     fn process_input_object<'input>(&mut self, obj: &'input object::File<'input>) -> Result<()> {
-        let mut load_dwo_section =
-            |id: gimli::SectionId| -> Result<_> { load_file_section(self.sess, id, &obj, true) };
+        if self.maybe_in_progress.is_none() {
+            self.maybe_in_progress =
+                Some(InProgressDwarfPackage::new(obj.architecture(), obj.endianness()));
+        }
 
-        let dwarf = gimli::Dwarf::load(&mut load_dwo_section)?;
-        let root_header = match dwarf.units().next().map_err(Error::ParseUnitHeader)? {
-            Some(header) => header,
-            None => {
-                debug!("input dwarf object has no units, skipping");
-                return Ok(());
-            }
+        let encoding = if let Some(section) = obj.section_by_name(".debug_info.dwo") {
+            let data = section.compressed_data()?.decompress()?;
+            let data_ref = self.sess.alloc_owned_cow(data);
+            let debug_info =
+                gimli::DebugInfo::new(data_ref, runtime_endian_from_endianness(obj.endianness()));
+            debug_info
+                .units()
+                .next()
+                .map_err(Error::ParseUnitHeader)?
+                .map(|root_header| root_header.encoding())
+                .ok_or(Error::NoCompilationUnits)?
+        } else {
+            debug!("no `.debug_info.dwo` in input dwarf object");
+            return Ok(());
         };
 
         let sess = self.sess;
-        self.in_progress_package(obj.architecture(), obj.endianness()).append_dwarf_object(
-            sess,
-            obj,
-            &dwarf,
-            root_header.encoding(),
-        )
+        // UNWRAP: safe, created above
+        self.maybe_in_progress.as_mut().unwrap().add_input_object(sess, obj, encoding)
     }
 
     /// Add input objects referenced by executable to the DWARF package.
@@ -201,7 +187,10 @@ where
 
             let target = match dwo_identifier_of_unit(&dwarf.debug_abbrev, &unit.header)? {
                 Some(target) => target,
-                None => continue,
+                None => {
+                    debug!("no target");
+                    continue;
+                }
             };
 
             let dwo_name = {
