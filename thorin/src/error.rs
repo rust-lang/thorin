@@ -46,6 +46,8 @@ pub enum Error {
     /// Input object that has a `DwoId` (or `DebugTypeSignature`) does not have a
     /// `DW_AT_GNU_dwo_name` or `DW_AT_dwo_name` attribute.
     MissingDwoName(u64),
+    /// Input object has no compilation units.
+    NoCompilationUnits,
     /// Top-level debugging information entry is not a compilation/type unit.
     TopLevelDieNotUnit,
     /// Section required of input DWARF objects was missing.
@@ -62,9 +64,6 @@ pub enum Error {
     IncompatibleIndexVersion(String, u16, u16),
     /// Failed to add a section to the output object.
     AppendSection(object::Error, &'static str),
-    /// Input file is DWARF 5 format but the `.debug_str_offsets.dwo` section doesn't have a
-    /// header.
-    StrOffsetsMissingHeader,
     /// Failed to read string offset from `.debug_str_offsets` at index.
     OffsetAtIndex(gimli::read::Error, u64),
     /// Failed to read string from `.debug_str` at offset.
@@ -83,6 +82,12 @@ pub enum Error {
     SectionNotInRow,
     /// Compilation unit in input DWARF object has no content.
     EmptyUnit(u64),
+    /// Found multiple `.debug_info.dwo` sections.
+    MultipleDebugInfoSection,
+    /// Found multiple `.debug_types.dwo` sections in a DWARF package file.
+    MultipleDebugTypesSection,
+    /// Found a regular compilation unit in a DWARF object.
+    NotSplitUnit,
     /// Found duplicate split compilation unit.
     DuplicateUnit(u64),
     /// Unit referenced by an executable was not found.
@@ -119,6 +124,7 @@ impl StdError for Error {
             Error::MultipleRelocations(_, _) => None,
             Error::UnsupportedRelocation(_, _) => None,
             Error::MissingDwoName(_) => None,
+            Error::NoCompilationUnits => None,
             Error::TopLevelDieNotUnit => None,
             Error::MissingRequiredSection(_) => None,
             Error::ParseUnitAbbreviations(source) => Some(source.as_dyn_error()),
@@ -127,7 +133,6 @@ impl StdError for Error {
             Error::ParseUnit(source) => Some(source.as_dyn_error()),
             Error::IncompatibleIndexVersion(_, _, _) => None,
             Error::AppendSection(source, _) => Some(source.as_dyn_error()),
-            Error::StrOffsetsMissingHeader => None,
             Error::OffsetAtIndex(source, _) => Some(source.as_dyn_error()),
             Error::StrAtOffset(source, _) => Some(source.as_dyn_error()),
             Error::WritingStrToStringTable(source) => Some(source.as_dyn_error()),
@@ -136,6 +141,9 @@ impl StdError for Error {
             Error::RowNotInIndex(source, _) => Some(source.as_dyn_error()),
             Error::SectionNotInRow => None,
             Error::EmptyUnit(_) => None,
+            Error::MultipleDebugInfoSection => None,
+            Error::MultipleDebugTypesSection => None,
+            Error::NotSplitUnit => None,
             Error::DuplicateUnit(_) => None,
             Error::MissingReferencedUnit(_) => None,
             Error::NoOutputObjectCreated => None,
@@ -180,6 +188,9 @@ impl fmt::Display for Error {
             Error::MissingDwoName(id) => {
                 write!(f, "Missing path attribute to DWARF object 0x{:08x}", id)
             }
+            Error::NoCompilationUnits => {
+                write!(f, "Input DWARF object has no compilation units")
+            }
             Error::TopLevelDieNotUnit => {
                 write!(f, "Top-level debugging information entry is not a compilation/type unit")
             }
@@ -199,9 +210,6 @@ impl fmt::Display for Error {
             }
             Error::AppendSection(_, section) => {
                 write!(f, "Failed to concatenate `{}` section from input DWARF object", section)
-            }
-            Error::StrOffsetsMissingHeader => {
-                write!(f, "Failed to read header of `.debug_str_offsets.dwo` section")
             }
             Error::OffsetAtIndex(_, index) => write!(
                 f,
@@ -226,6 +234,15 @@ impl fmt::Display for Error {
             Error::SectionNotInRow => write!(f, "Section not found in unit's row in index"),
             Error::EmptyUnit(unit) => {
                 write!(f, "Unit `{}` in input DWARF object with no data", unit)
+            }
+            Error::MultipleDebugInfoSection => {
+                write!(f, "Found multiple `.debug_info.dwo` sections")
+            }
+            Error::MultipleDebugTypesSection => {
+                write!(f, "Found multiple `.debug_types.dwo` sections in a DWARF package file")
+            }
+            Error::NotSplitUnit => {
+                write!(f, "Found regular compilation unit in DWARF object (missing DWO id)")
             }
             Error::DuplicateUnit(unit) => {
                 write!(f, "Found duplicate split compilation unit (0x{:08x})", unit)
