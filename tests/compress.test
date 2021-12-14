@@ -1,0 +1,8 @@
+RUN: thorin %p/inputs/compress.dwo -o %t
+RUN: llvm-dwarfdump -v %t | FileCheck %s
+
+CHECK: .debug_info.dwo contents:
+CHECK: Compile Unit:
+CHECK:   DW_TAG_compile_unit
+CHECK:     DW_TAG_subprogram
+CHECK:       DW_TAG_formal_parameter

@@ -1,0 +1,4 @@
+RUN: not thorin %p/inputs/non-cu-top-level.dwo -o %t 2>&1 | FileCheck %s
+
+CHECK: Error: Failed to add input object to DWARF package
+CHECK:  Top-level debugging information entry is not a compilation/type unit

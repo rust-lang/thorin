@@ -1,0 +1,10 @@
+RUN: not thorin %p/inputs/compress-fail-a.dwo -o %t 2>&1 | FileCheck %s
+RUN: not thorin %p/inputs/empty-compressed-section.dwo -o %t 2>&1 | FileCheck %s
+RUN: not thorin %p/inputs/invalid-compressed.dwo -o %t 2>&1 | FileCheck --check-prefix=INVALID %s
+
+CHECK: Error: Failed to add input object to DWARF package
+CHECK:  Invalid ELF GNU compressed section header
+
+# `llvm-dwp` fails to decompress this, but `thorin` is able to but the contents aren't meaningful.
+INVALID: Error: Failed to add input object to DWARF package
+INVALID:  Failed to read string at offset 00000000 of `.debug_str.dwo` section
