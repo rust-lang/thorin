@@ -1,7 +1,21 @@
-use gimli::{Encoding, EndianSlice, UnitIndex};
-use object::ObjectSection;
+use gimli::{Encoding, EndianSlice, RunTimeEndian, UnitIndex};
+use object::{Endianness, ObjectSection};
 
 use crate::{relocate::RelocationMap, Session};
+
+/// Helper trait to translate between `object`'s `Endianness` and `gimli`'s `RunTimeEndian`.
+pub(crate) trait EndianityExt {
+    fn as_runtime_endian(&self) -> RunTimeEndian;
+}
+
+impl EndianityExt for Endianness {
+    fn as_runtime_endian(&self) -> RunTimeEndian {
+        match *self {
+            Endianness::Little => RunTimeEndian::Little,
+            Endianness::Big => RunTimeEndian::Big,
+        }
+    }
+}
 
 /// Helper trait to add `compressed_data_range` function to `ObjectSection` types.
 pub(crate) trait CompressedDataRangeExt<'input, 'session: 'input>:

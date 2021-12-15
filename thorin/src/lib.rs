@@ -11,10 +11,11 @@ use tracing::{debug, trace};
 
 use crate::{
     error::Result,
+    ext::EndianityExt,
     index::Bucketable,
     package::{DwarfObjectIdentifier, InProgressDwarfPackage},
     relocate::{add_relocations, Relocate, RelocationMap},
-    util::{dwo_identifier_of_unit, runtime_endian_from_endianness},
+    util::dwo_identifier_of_unit,
 };
 
 mod error;
@@ -119,8 +120,7 @@ where
         let encoding = if let Some(section) = obj.section_by_name(".debug_info.dwo") {
             let data = section.compressed_data()?.decompress()?;
             let data_ref = self.sess.alloc_owned_cow(data);
-            let debug_info =
-                gimli::DebugInfo::new(data_ref, runtime_endian_from_endianness(obj.endianness()));
+            let debug_info = gimli::DebugInfo::new(data_ref, obj.endianness().as_runtime_endian());
             debug_info
                 .units()
                 .next()
@@ -159,8 +159,7 @@ where
             };
 
             let data_ref = self.sess.alloc_owned_cow(data);
-            let reader =
-                EndianSlice::new(data_ref, runtime_endian_from_endianness(obj.endianness()));
+            let reader = EndianSlice::new(data_ref, obj.endianness().as_runtime_endian());
             let section = reader;
             let relocations = self.sess.alloc_relocation(relocations);
             Ok(Relocate { relocations, section, reader })

@@ -1,5 +1,5 @@
-use gimli::{Encoding, RunTimeEndian, UnitIndex, UnitType};
-use object::{Endianness, Object, ObjectSection};
+use gimli::{Encoding, UnitIndex, UnitType};
+use object::{Object, ObjectSection};
 
 use crate::{
     error::{Error, Result},
@@ -9,14 +9,6 @@ use crate::{
     relocate::RelocationMap,
     Session,
 };
-
-/// Returns the gimli `RunTimeEndian` corresponding to a object `Endianness`.
-pub(crate) fn runtime_endian_from_endianness(endianness: Endianness) -> RunTimeEndian {
-    match endianness {
-        Endianness::Little => RunTimeEndian::Little,
-        Endianness::Big => RunTimeEndian::Big,
-    }
-}
 
 /// Returns the parsed unit index from a `.debug_{cu,tu}_index` section.
 pub(crate) fn maybe_load_index_section<'input, 'session: 'input, Endian, Index, R, Sess>(
