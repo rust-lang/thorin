@@ -17,6 +17,7 @@ impl<'a, T: StdError + 'a> AsDynError<'a> for T {
 
 /// Diagnostics (and contexts) emitted during DWARF packaging.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// Failure to read input file, this error occurs in the `Session::read_input` function
     /// provided by the user of `thorin`.
@@ -67,14 +68,10 @@ pub enum Error {
     ParseUnit(gimli::read::Error),
     /// Input DWARF package has a different index version than the version being output.
     IncompatibleIndexVersion(String, u16, u16),
-    /// Failed to add a section to the output object.
-    AppendSection(object::Error, &'static str),
     /// Failed to read string offset from `.debug_str_offsets` at index.
     OffsetAtIndex(gimli::read::Error, u64),
     /// Failed to read string from `.debug_str` at offset.
     StrAtOffset(gimli::read::Error, usize),
-    /// Failed to write string to string table.
-    WritingStrToStringTable(gimli::write::Error),
     /// Failed to parse index section. If an input file is a DWARF package, its index section needs
     /// to be read to ensure that the contributions within it are preserved.
     ParseIndex(gimli::read::Error, String),
@@ -139,10 +136,8 @@ impl StdError for Error {
             Error::ParseUnitHeader(source) => Some(source.as_dyn_error()),
             Error::ParseUnit(source) => Some(source.as_dyn_error()),
             Error::IncompatibleIndexVersion(_, _, _) => None,
-            Error::AppendSection(source, _) => Some(source.as_dyn_error()),
             Error::OffsetAtIndex(source, _) => Some(source.as_dyn_error()),
             Error::StrAtOffset(source, _) => Some(source.as_dyn_error()),
-            Error::WritingStrToStringTable(source) => Some(source.as_dyn_error()),
             Error::ParseIndex(source, _) => Some(source.as_dyn_error()),
             Error::UnitNotInIndex(_) => None,
             Error::RowNotInIndex(source, _) => Some(source.as_dyn_error()),
@@ -221,9 +216,6 @@ impl fmt::Display for Error {
                     section, actual, format
                 )
             }
-            Error::AppendSection(_, section) => {
-                write!(f, "Failed to concatenate `{}` section from input DWARF object", section)
-            }
             Error::OffsetAtIndex(_, index) => write!(
                 f,
                 "Failed to read offset at index {} of `.debug_str_offsets.dwo` section",
@@ -234,9 +226,6 @@ impl fmt::Display for Error {
                 "Failed to read string at offset {:08x} of `.debug_str.dwo` section",
                 offset
             ),
-            Error::WritingStrToStringTable(_) => {
-                write!(f, "Failed to write string to in-progress `.debug_str.dwo` section")
-            }
             Error::ParseIndex(_, section) => write!(f, "Failed to parse `{}` section", section),
             Error::UnitNotInIndex(unit) => {
                 write!(f, "Unit 0x{0:08x} from input DWARF package is not in its index", unit)
