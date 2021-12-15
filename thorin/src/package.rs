@@ -9,14 +9,11 @@ use tracing::debug;
 
 use crate::{
     error::{Error, Result},
-    ext::CompressedDataRangeExt,
+    ext::{CompressedDataRangeExt, EndianityExt},
     index::{write_index, Bucketable, Contribution, ContributionOffset, IndexEntry},
     relocate::RelocationMap,
     strings::PackageStringTable,
-    util::{
-        create_contribution_adjustor, dwo_identifier_of_unit, maybe_load_index_section,
-        runtime_endian_from_endianness,
-    },
+    util::{create_contribution_adjustor, dwo_identifier_of_unit, maybe_load_index_section},
     Session,
 };
 
@@ -243,13 +240,11 @@ impl<'file> InProgressDwarfPackage<'file> {
         architecture: object::Architecture,
         endianness: object::Endianness,
     ) -> InProgressDwarfPackage<'file> {
-        let endian = runtime_endian_from_endianness(endianness);
+        let endian = endianness.as_runtime_endian();
         Self {
             endian,
-
             obj: DwarfPackageObject::new(architecture, endianness),
             string_table: PackageStringTable::new(endian),
-
             cu_index_entries: Default::default(),
             tu_index_entries: Default::default(),
             contained_units: Default::default(),
