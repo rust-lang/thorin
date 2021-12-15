@@ -3,9 +3,9 @@ on: [push, pull_request]
 name: continuous integration
 
 jobs:
-  build:
-    name: build
-    runs-on: ubuntu-latest
+  test:
+    name: test
+    runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
@@ -16,24 +16,21 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: build
-
-  test:
-    name: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-      - uses: actions-rs/cargo@v1
-        with:
-          command: test
+          args: --release
+      - name: Install LLVM
+        run: |
+          wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+          sudo add-apt-repository "deb http://apt.llvm.org/focal/ llvm-toolchain-focal-13 main"
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes llvm-13 llvm-13-tools
+      - name: Install lit
+        run: pip install lit
+      - name: Run lit testsuite
+        run: lit -v --path "$PWD/target/release/:/usr/lib/llvm-13/bin/" ./tests
 
   fmt:
     name: rustfmt
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
@@ -41,7 +38,8 @@ jobs:
           profile: minimal
           toolchain: stable
           override: true
-      - run: rustup component add rustfmt
+      - name: Add rustup component
+        run: rustup component add rustfmt
       - uses: actions-rs/cargo@v1
         with:
           command: fmt
