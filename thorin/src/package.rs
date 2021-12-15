@@ -9,6 +9,7 @@ use tracing::debug;
 
 use crate::{
     error::{Error, Result},
+    ext::CompressedDataRangeExt,
     index::{
         Bucketable, Contribution, ContributionOffset, CuIndexEntry, IndexCollection, TuIndexEntry,
     },
@@ -16,56 +17,10 @@ use crate::{
     strings::PackageStringTable,
     util::{
         create_contribution_adjustor, dwo_identifier_of_unit, maybe_load_index_section,
-        runtime_endian_from_endianness, CompressedDataRangeExt,
+        runtime_endian_from_endianness,
     },
     Session,
 };
-
-pub(crate) trait PackageFormatExt {
-    /// Returns `true` if this `Encoding` would produce to a DWARF 5-standardized package file.
-    ///
-    /// See Sec 7.3.5 and Appendix F of [DWARF specification](https://dwarfstd.org/doc/DWARF5.pdf).
-    fn is_std_dwarf_package_format(&self) -> bool;
-
-    /// Returns `true` if this `Encoding` would produce a GNU Extension DWARF package file
-    /// (preceded standardized version from DWARF 5).
-    ///
-    /// See [specification](https://gcc.gnu.org/wiki/DebugFissionDWP).
-    fn is_gnu_extension_dwarf_package_format(&self) -> bool;
-
-    /// Returns index version of DWARF package for this `Encoding`.
-    fn dwarf_package_index_version(&self) -> u16;
-
-    /// Returns `true` if the dwarf package index version provided is compatible with this
-    /// `Encoding`.
-    fn is_compatible_dwarf_package_index_version(&self, index_version: u16) -> bool;
-}
-
-impl PackageFormatExt for Encoding {
-    fn is_gnu_extension_dwarf_package_format(&self) -> bool {
-        !self.is_std_dwarf_package_format()
-    }
-
-    fn is_std_dwarf_package_format(&self) -> bool {
-        self.version >= 5
-    }
-
-    fn dwarf_package_index_version(&self) -> u16 {
-        if self.is_gnu_extension_dwarf_package_format() {
-            2
-        } else {
-            5
-        }
-    }
-
-    fn is_compatible_dwarf_package_index_version(&self, index_version: u16) -> bool {
-        if self.is_gnu_extension_dwarf_package_format() {
-            index_version == 2
-        } else {
-            index_version >= 5
-        }
-    }
-}
 
 /// New-type'd index (constructed from `gimli::DwoId`) with a custom `Debug` implementation to
 /// print in hexadecimal.

@@ -1,10 +1,11 @@
-use gimli::{Encoding, EndianSlice, RunTimeEndian, UnitIndex, UnitType};
+use gimli::{Encoding, RunTimeEndian, UnitIndex, UnitType};
 use object::{Endianness, Object, ObjectSection};
 
 use crate::{
     error::{Error, Result},
+    ext::{IndexSectionExt, PackageFormatExt},
     index::{Bucketable, Contribution, ContributionOffset},
-    package::{DwarfObjectIdentifier, PackageFormatExt},
+    package::DwarfObjectIdentifier,
     relocate::RelocationMap,
     Session,
 };
@@ -17,81 +18,6 @@ pub(crate) fn runtime_endian_from_endianness(endianness: Endianness) -> RunTimeE
     }
 }
 
-/// Helper trait to add `compressed_data_range` function to `ObjectSection` types.
-pub(crate) trait CompressedDataRangeExt<'input, 'session: 'input>:
-    ObjectSection<'input>
-{
-    /// Return the decompressed contents of the section data in the given range.
-    fn compressed_data_range(
-        &self,
-        sess: &'session impl Session<RelocationMap>,
-        address: u64,
-        size: u64,
-    ) -> object::Result<Option<&'input [u8]>>;
-}
-
-impl<'input, 'session: 'input, S> CompressedDataRangeExt<'input, 'session> for S
-where
-    S: ObjectSection<'input>,
-{
-    fn compressed_data_range(
-        &self,
-        sess: &'session impl Session<RelocationMap>,
-        address: u64,
-        size: u64,
-    ) -> object::Result<Option<&'input [u8]>> {
-        let data = self.compressed_data()?.decompress()?;
-
-        /// Originally from `object::read::util`, used in `ObjectSection::data_range`, but not
-        /// public.
-        fn data_range(
-            data: &[u8],
-            data_address: u64,
-            range_address: u64,
-            size: u64,
-        ) -> Option<&[u8]> {
-            let offset = range_address.checked_sub(data_address)?;
-            data.get(offset.try_into().ok()?..)?.get(..size.try_into().ok()?)
-        }
-
-        let data_ref = sess.alloc_owned_cow(data);
-        Ok(data_range(data_ref, self.address(), address, size))
-    }
-}
-
-/// Helper trait that abstracts over `gimli::DebugCuIndex` and `gimli::DebugTuIndex`.
-pub(crate) trait IndexSection<'input, Endian: gimli::Endianity, R: gimli::Reader>:
-    gimli::Section<R>
-{
-    fn new(section: &'input [u8], endian: Endian) -> Self;
-
-    fn index(self) -> gimli::read::Result<UnitIndex<R>>;
-}
-
-impl<'input, Endian: gimli::Endianity> IndexSection<'input, Endian, EndianSlice<'input, Endian>>
-    for gimli::DebugCuIndex<EndianSlice<'input, Endian>>
-{
-    fn new(section: &'input [u8], endian: Endian) -> Self {
-        Self::new(section, endian)
-    }
-
-    fn index(self) -> gimli::read::Result<UnitIndex<EndianSlice<'input, Endian>>> {
-        Self::index(self)
-    }
-}
-
-impl<'input, Endian: gimli::Endianity> IndexSection<'input, Endian, EndianSlice<'input, Endian>>
-    for gimli::DebugTuIndex<EndianSlice<'input, Endian>>
-{
-    fn new(section: &'input [u8], endian: Endian) -> Self {
-        Self::new(section, endian)
-    }
-
-    fn index(self) -> gimli::read::Result<UnitIndex<EndianSlice<'input, Endian>>> {
-        Self::index(self)
-    }
-}
-
 /// Returns the parsed unit index from a `.debug_{cu,tu}_index` section.
 pub(crate) fn maybe_load_index_section<'input, 'session: 'input, Endian, Index, R, Sess>(
     sess: &'session Sess,
@@ -101,7 +27,7 @@ pub(crate) fn maybe_load_index_section<'input, 'session: 'input, Endian, Index, 
 ) -> Result<Option<UnitIndex<R>>>
 where
     Endian: gimli::Endianity,
-    Index: IndexSection<'input, Endian, R>,
+    Index: IndexSectionExt<'input, Endian, R>,
     R: gimli::Reader,
     Sess: Session<RelocationMap>,
 {
