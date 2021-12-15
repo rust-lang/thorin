@@ -1,7 +1,7 @@
 # RUN: llvm-mc -triple x86_64-unknown-linux %s -filetype=obj -o %t.dwp
 # RUN: not thorin %t.dwp -o %t 2>&1 | FileCheck %s
 
-# CHECK: Error: Failed to add input object to DWARF package
+# CHECK: Error: Failed to add `{{.*}}/incompatible-tu-index-version.s.tmp.dwp` to DWARF package
 # CHECK:  Incompatible `.debug_tu_index` index version: found version 5, expected version 2
 
 .section .debug_abbrev.dwo, "e", @progbits

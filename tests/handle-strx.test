@@ -6,5 +6,5 @@ RUN:   | FileCheck --check-prefix=PARSE_STRX %s
 
 READ_STRX: DW_AT_name [DW_FORM_strx1]{{.*}}dw5.cc
 
-PARSE_STRX: Error: Failed to add input object to DWARF package
-PARSE_STRX:  Found duplicate split compilation unit ({{.*}})
+PARSE_STRX: Error: Failed to add `{{.*}}/handle-strx-v5.dwo` to DWARF package
+PARSE_STRX:  Duplicate split compilation unit ({{.*}})

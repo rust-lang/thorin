@@ -71,5 +71,5 @@ CHECK:   DW_AT_name {{.*}} "e.cpp"
 CHECK:   DW_TAG_subprogram
 CHECK:     DW_AT_name {{.*}} "e"
 
-MISSING: Error: Failed to finish creation of DWARF package
-MISSING:  Unit 0x{{.*}} was referenced by executable but not found
+MISSING: Error: Failed verifying final DWARF package
+MISSING:  Unit 0x{{.*}} referenced by executable was not found

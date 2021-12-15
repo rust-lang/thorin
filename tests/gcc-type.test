@@ -4,5 +4,5 @@ RUN: not thorin %p/inputs/gcc-type.dwo %p/inputs/gcc-type.dwo -o %t 2>&1 | FileC
 CHECK: Type Unit
 CHECK: Type Unit
 
-DUP: Error: Failed to add input object to DWARF package
-DUP:  Found duplicate split compilation unit ({{.*}})
+DUP: Error: Failed to add `{{.*}}/gcc-type.dwo` to DWARF package
+DUP:  Duplicate split compilation unit ({{.*}})
