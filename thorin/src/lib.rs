@@ -13,9 +13,8 @@ use crate::{
     error::Result,
     ext::EndianityExt,
     index::Bucketable,
-    package::{DwarfObjectIdentifier, InProgressDwarfPackage},
+    package::{dwo_identifier_of_unit, DwarfObjectIdentifier, InProgressDwarfPackage},
     relocate::{add_relocations, Relocate, RelocationMap},
-    util::dwo_identifier_of_unit,
 };
 
 mod error;
@@ -24,7 +23,6 @@ mod index;
 mod package;
 mod relocate;
 mod strings;
-mod util;
 
 pub use crate::error::Error;
 
