@@ -164,8 +164,7 @@ where
     R: gimli::Reader,
     Sess: Session<RelocationMap>,
 {
-    // UNWRAP: `Index` types provided known to have `dwo_name` value.
-    let index_name = Index::id().dwo_name().unwrap();
+    let index_name = Index::id().dwo_name().expect("index id w/out known value");
     if let Some(index_section) = input.section_by_name(index_name) {
         let index_data = index_section
             .compressed_data()
@@ -312,8 +311,7 @@ macro_rules! generate_append_for {
                     self.$name = Some(id);
                     id
                 } else {
-                    // UNWRAP: checked above
-                    self.$name.unwrap()
+                    self.$name.expect("`generate_append_for` is broken")
                 };
 
                 // FIXME: correct alignment
