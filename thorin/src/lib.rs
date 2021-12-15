@@ -131,8 +131,10 @@ where
         };
 
         let sess = self.sess;
-        // UNWRAP: safe, created above
-        self.maybe_in_progress.as_mut().unwrap().add_input_object(sess, obj, encoding)
+        self.maybe_in_progress
+            .as_mut()
+            .expect("`process_input_object` is broken")
+            .add_input_object(sess, obj, encoding)
     }
 
     /// Add input objects referenced by executable to the DWARF package.
