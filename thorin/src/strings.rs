@@ -9,7 +9,7 @@ use tracing::debug;
 
 use crate::{
     error::{Error, Result},
-    package::PackageFormatExt,
+    ext::PackageFormatExt,
 };
 
 /// New-type'd index from `IndexVec` of strings inserted into the `.debug_str` section.

@@ -8,7 +8,8 @@ use tracing::{debug, trace};
 
 use crate::{
     error::{Error, Result},
-    package::{DebugTypeSignature, DwoId, PackageFormatExt},
+    ext::PackageFormatExt,
+    package::{DebugTypeSignature, DwoId},
 };
 
 /// Helper trait for types that can be used in creating the `.debug_{cu,tu}_index` hash table.

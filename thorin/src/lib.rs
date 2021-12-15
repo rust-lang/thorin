@@ -18,6 +18,7 @@ use crate::{
 };
 
 mod error;
+mod ext;
 mod index;
 mod package;
 mod relocate;
