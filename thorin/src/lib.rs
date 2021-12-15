@@ -303,6 +303,15 @@ where
 
                 package.finish()
             }
+            None if !self.targets.is_empty() => {
+                let first_missing_unit = self
+                    .targets
+                    .iter()
+                    .next()
+                    .copied()
+                    .expect("non-empty map doesn't have first element");
+                Err(Error::MissingReferencedUnit(first_missing_unit.index()))
+            }
             None => Err(Error::NoOutputObjectCreated),
         }
     }
