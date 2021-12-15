@@ -9,9 +9,6 @@ use object::{Object, ObjectSection, ObjectSymbol, RelocationKind, RelocationTarg
 
 use crate::{Error, Result};
 
-pub(crate) type DwpReader<'arena> =
-    Relocate<'arena, gimli::EndianSlice<'arena, gimli::RunTimeEndian>>;
-
 pub(crate) type RelocationMap = HashMap<usize, object::Relocation>;
 
 #[derive(Debug, Clone)]

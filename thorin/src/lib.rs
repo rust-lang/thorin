@@ -13,7 +13,7 @@ use crate::{
     error::Result,
     index::Bucketable,
     package::{DwarfObjectIdentifier, InProgressDwarfPackage},
-    relocate::{add_relocations, DwpReader, Relocate, RelocationMap},
+    relocate::{add_relocations, Relocate, RelocationMap},
     util::{dwo_identifier_of_unit, runtime_endian_from_endianness},
 };
 
@@ -53,36 +53,6 @@ pub trait Session<Relocations> {
 
     /// Returns a reference to contents of file at `path` with lifetime `'session`.
     fn read_input<'session>(&'session self, path: &Path) -> std::io::Result<&'session [u8]>;
-}
-
-/// Loads a section of a file from `object::File` into a `gimli::EndianSlice`. Expected to be
-/// curried using a closure and provided to `Dwarf::load`.
-#[tracing::instrument(level = "trace", skip(sess, obj))]
-fn load_file_section<'input, 'session: 'input>(
-    sess: &'session impl Session<RelocationMap>,
-    id: gimli::SectionId,
-    obj: &object::File<'input>,
-    is_dwo: bool,
-) -> Result<DwpReader<'input>> {
-    let mut relocations = RelocationMap::default();
-    let name = if is_dwo { id.dwo_name() } else { Some(id.name()) };
-
-    let data = match name.and_then(|name| obj.section_by_name(&name)) {
-        Some(ref section) => {
-            if !is_dwo {
-                add_relocations(&mut relocations, obj, section)?;
-            }
-            section.compressed_data()?.decompress()?
-        }
-        // Use a non-zero capacity so that `ReaderOffsetId`s are unique.
-        None => Cow::Owned(Vec::with_capacity(1)),
-    };
-
-    let data_ref = sess.alloc_owned_cow(data);
-    let reader = EndianSlice::new(data_ref, runtime_endian_from_endianness(obj.endianness()));
-    let section = reader;
-    let relocations = sess.alloc_relocation(relocations);
-    Ok(Relocate { relocations, section, reader })
 }
 
 /// Should missing DWARF objects referenced by executables be skipped or result in an error?
@@ -177,8 +147,24 @@ where
         let data = self.sess.read_input(path).map_err(Error::ReadInput)?;
         let obj = object::File::parse(data).map_err(Error::ParseObjectFile)?;
 
-        let mut load_section =
-            |id: gimli::SectionId| -> Result<_> { load_file_section(self.sess, id, &obj, false) };
+        let mut load_section = |id: gimli::SectionId| -> Result<_> {
+            let mut relocations = RelocationMap::default();
+            let data = match obj.section_by_name(&id.name()) {
+                Some(ref section) => {
+                    add_relocations(&mut relocations, &obj, section)?;
+                    section.compressed_data()?.decompress()?
+                }
+                // Use a non-zero capacity so that `ReaderOffsetId`s are unique.
+                None => Cow::Owned(Vec::with_capacity(1)),
+            };
+
+            let data_ref = self.sess.alloc_owned_cow(data);
+            let reader =
+                EndianSlice::new(data_ref, runtime_endian_from_endianness(obj.endianness()));
+            let section = reader;
+            let relocations = self.sess.alloc_relocation(relocations);
+            Ok(Relocate { relocations, section, reader })
+        };
 
         let dwarf = gimli::Dwarf::load(&mut load_section)?;
 
