@@ -454,7 +454,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "thorin"
+name = "thorin-dwp"
 version = "0.1.0"
 dependencies = [
  "gimli",
@@ -464,7 +464,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "thorin-bin"
+name = "thorin-dwp-bin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -472,7 +472,7 @@ dependencies = [
  "object",
  "structopt",
  "thiserror",
- "thorin",
+ "thorin-dwp",
  "tracing",
  "tracing-subscriber",
  "tracing-tree",

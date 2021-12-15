@@ -1,9 +1,13 @@
 [package]
-name = "thorin"
+name = "thorin-dwp"
 authors = [ "David Wood <david.wood@huawei.com>" ]
-description = "Merge dwarf objects into dwarf packages"
-license = "Apache-2.0/MIT"
+categories = ["development-tools::debugging"]
+description = "Library for building DWARF packages from input DWARF objects and packages"
+homepage = "https://docs.rs/thorin-dwp"
+keywords = ["dwarf", "split-dwarf", "dwarf-package", "dwarf-object", "dwp"]
+license = "MIT OR Apache-2.0"
 readme = "../README.md"
+repository = "https://github.com/davidtwco/thorin"
 version = "0.1.0"
 edition = "2021"
 
@@ -22,3 +26,7 @@ features = [ "read", "write", "std" ]
 version  = "0.27.1"
 default-features = false
 features = [ "archive", "read", "write", "compression" ]
+
+[lib]
+name = "thorin"
+bench = false
