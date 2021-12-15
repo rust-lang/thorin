@@ -90,10 +90,7 @@ pub(crate) struct IndexEntry {
 }
 
 impl IndexEntry {
-    fn encoding(&self) -> Encoding {
-        self.encoding
-    }
-
+    /// Return the number of columns required for this index entry.
     fn number_of_columns(&self) -> u32 {
         self.debug_info.map_or(0, |_| 1)
             + self.debug_types.map_or(0, |_| 1)
@@ -107,6 +104,11 @@ impl IndexEntry {
             + self.debug_macro.map_or(0, |_| 1)
     }
 
+    /// Write the header row for this entry.
+    ///
+    /// There is only a single header row in any index section, its contents depend on the output
+    /// format and the columns from contributions so a complete index entry is required to know
+    /// what header to write.
     fn write_header<Endian: gimli::Endianity>(&self, out: &mut EndianVec<Endian>) -> Result<()> {
         if self.encoding.is_gnu_extension_dwarf_package_format() {
             if self.debug_info.is_some() {
@@ -160,6 +162,7 @@ impl IndexEntry {
         Ok(())
     }
 
+    /// Visit each contribution in an entry, calling `proj` to write a specific field.
     #[tracing::instrument(level = "trace", skip(out, proj))]
     fn write_contribution<Endian, Proj>(
         &self,
@@ -211,6 +214,7 @@ impl Bucketable for IndexEntry {
     }
 }
 
+/// Write a `.debug_{cu,tu}_index` section given `IndexEntry`s.
 #[tracing::instrument(level = "trace")]
 pub(crate) fn write_index<'output, Endian: gimli::Endianity>(
     endianness: Endian,
@@ -225,8 +229,8 @@ pub(crate) fn write_index<'output, Endian: gimli::Endianity>(
     let buckets = bucket(entries);
     debug!(?buckets);
 
-    let encoding = entries[0].encoding();
-    if !entries.iter().all(|e| e.encoding() == encoding) {
+    let encoding = entries[0].encoding;
+    if !entries.iter().all(|e| e.encoding == encoding) {
         return Err(Error::MixedInputEncodings);
     }
     debug!(?encoding);
