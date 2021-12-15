@@ -104,6 +104,20 @@ impl IndexEntry {
             + self.debug_macro.map_or(0, |_| 1)
     }
 
+    /// Returns `true` if the header of this entry is the same as the header of `other`.
+    fn eq_header(&self, other: &Self) -> bool {
+        (self.debug_info.is_some() == other.debug_info.is_some())
+            && (self.debug_types.is_some() == other.debug_types.is_some())
+            && (self.debug_abbrev.is_some() == other.debug_abbrev.is_some())
+            && (self.debug_line.is_some() == other.debug_line.is_some())
+            && (self.debug_loc.is_some() == other.debug_loc.is_some())
+            && (self.debug_loclists.is_some() == other.debug_loclists.is_some())
+            && (self.debug_rnglists.is_some() == other.debug_rnglists.is_some())
+            && (self.debug_str_offsets.is_some() == other.debug_str_offsets.is_some())
+            && (self.debug_macinfo.is_some() == other.debug_macinfo.is_some())
+            && (self.debug_macro.is_some() == other.debug_macro.is_some())
+    }
+
     /// Write the header row for this entry.
     ///
     /// There is only a single header row in any index section, its contents depend on the output
@@ -236,9 +250,16 @@ pub(crate) fn write_index<'output, Endian: gimli::Endianity>(
     debug!(?encoding);
 
     let num_columns = entries[0].number_of_columns();
-    debug!(?entries);
-    assert!(entries.iter().all(|e| e.number_of_columns() == num_columns));
-    debug!(?num_columns);
+    debug!(?entries, ?num_columns);
+
+    assert!(entries.windows(2).all(|window| {
+        trace!(?window);
+        match window {
+            [_] => true,
+            [first, second] => first.eq_header(second),
+            _ => panic!("invalid window"),
+        }
+    }));
 
     // Write header..
     if encoding.is_gnu_extension_dwarf_package_format() {
