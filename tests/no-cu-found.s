@@ -2,7 +2,7 @@
 # RUN:   -dwarf-version=5 %s -o %t.o
 # RUN: not thorin %t.dwo -o /dev/null 2>&1 | FileCheck %s
 
-# CHECK: Error: Failed to add input object to DWARF package
+# CHECK: Error: Failed to add `{{.*}}/no-cu-found.s.tmp.dwo` to DWARF package
 # CHECK:  0: Failed to parse unit header
 # CHECK:  1: The `DW_UT_*` value for this unit is not supported yet
 

@@ -1,4 +1,4 @@
 RUN: not thorin %p/inputs/multiple-type-sections.dwp -o %t 2>&1 | FileCheck %s
 
-CHECK: Error: Failed to add input object to DWARF package
-CHECK:  Found multiple `.debug_types.dwo` sections in a DWARF package file
+CHECK: Error: Failed to add `{{.*}}/multiple-type-sections.dwp` to DWARF package
+CHECK:  Multiple `.debug_types.dwo` sections in a package

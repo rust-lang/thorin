@@ -163,12 +163,12 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::ReadInput(_) => write!(f, "Failed to read input file"),
-            Error::ParseFileKind(_) => write!(f, "Failed to parse kind of input file"),
-            Error::ParseObjectFile(_) => write!(f, "Failed to parse object file"),
-            Error::ParseArchiveFile(_) => write!(f, "Failed to parse archive file"),
+            Error::ParseFileKind(_) => write!(f, "Failed to parse input file kind"),
+            Error::ParseObjectFile(_) => write!(f, "Failed to parse input object file"),
+            Error::ParseArchiveFile(_) => write!(f, "Failed to parse input archive file"),
             Error::ParseArchiveMember(_) => write!(f, "Failed to parse archive member"),
-            Error::InvalidInputKind => write!(f, "Input is not an archive or elf file"),
-            Error::DecompressData(_) => write!(f, "Failed to decompress data"),
+            Error::InvalidInputKind => write!(f, "Input is not an archive or elf object"),
+            Error::DecompressData(_) => write!(f, "Failed to decompress compressed section"),
             Error::NamelessSection(_, offset) => {
                 write!(f, "Section without name at offset 0x{:08x}", offset)
             }
@@ -188,13 +188,13 @@ impl fmt::Display for Error {
                 section, offset
             ),
             Error::MissingDwoName(id) => {
-                write!(f, "Missing path attribute to DWARF object 0x{:08x}", id)
+                write!(f, "Missing path attribute to DWARF object (0x{:08x})", id)
             }
             Error::NoCompilationUnits => {
-                write!(f, "Input DWARF object has no compilation units")
+                write!(f, "Input object has no compilation units")
             }
             Error::NoDie => {
-                write!(f, "No top-level debugging information entry in unit")
+                write!(f, "No top-level debugging information entry in compilation/type unit")
             }
             Error::TopLevelDieNotUnit => {
                 write!(f, "Top-level debugging information entry is not a compilation/type unit")
@@ -203,7 +203,7 @@ impl fmt::Display for Error {
                 write!(f, "Section name is not valid UTF-8")
             }
             Error::MissingRequiredSection(section) => {
-                write!(f, "Input DWARF object missing required section `{}`", section)
+                write!(f, "Input object missing required section `{}`", section)
             }
             Error::ParseUnitAbbreviations(_) => write!(f, "Failed to parse unit abbreviations"),
             Error::ParseUnitAttribute(_) => write!(f, "Failed to parse unit attribute"),
@@ -216,41 +216,39 @@ impl fmt::Display for Error {
                     section, actual, format
                 )
             }
-            Error::OffsetAtIndex(_, index) => write!(
-                f,
-                "Failed to read offset at index {} of `.debug_str_offsets.dwo` section",
-                index
-            ),
-            Error::StrAtOffset(_, offset) => write!(
-                f,
-                "Failed to read string at offset {:08x} of `.debug_str.dwo` section",
-                offset
-            ),
-            Error::ParseIndex(_, section) => write!(f, "Failed to parse `{}` section", section),
+            Error::OffsetAtIndex(_, index) => {
+                write!(f, "Read offset at index {} of `.debug_str_offsets.dwo` section", index)
+            }
+            Error::StrAtOffset(_, offset) => {
+                write!(f, "Read string at offset 0x{:08x} of `.debug_str.dwo` section", offset)
+            }
+            Error::ParseIndex(_, section) => {
+                write!(f, "Failed to parse `{}` index section", section)
+            }
             Error::UnitNotInIndex(unit) => {
-                write!(f, "Unit 0x{0:08x} from input DWARF package is not in its index", unit)
+                write!(f, "Unit 0x{0:08x} from input package is not in its index", unit)
             }
             Error::RowNotInIndex(_, row) => {
                 write!(f, "Row {0} found in index's hash table not present in index", row)
             }
             Error::SectionNotInRow => write!(f, "Section not found in unit's row in index"),
             Error::EmptyUnit(unit) => {
-                write!(f, "Unit `{}` in input DWARF object with no data", unit)
+                write!(f, "Unit 0x{:08x} in input DWARF object with no data", unit)
             }
             Error::MultipleDebugInfoSection => {
-                write!(f, "Found multiple `.debug_info.dwo` sections")
+                write!(f, "Multiple `.debug_info.dwo` sections")
             }
             Error::MultipleDebugTypesSection => {
-                write!(f, "Found multiple `.debug_types.dwo` sections in a DWARF package file")
+                write!(f, "Multiple `.debug_types.dwo` sections in a package")
             }
             Error::NotSplitUnit => {
-                write!(f, "Found regular compilation unit in DWARF object (missing DWO id)")
+                write!(f, "Regular compilation unit in object (missing dwo identifier)")
             }
             Error::DuplicateUnit(unit) => {
-                write!(f, "Found duplicate split compilation unit (0x{:08x})", unit)
+                write!(f, "Duplicate split compilation unit (0x{:08x})", unit)
             }
             Error::MissingReferencedUnit(unit) => {
-                write!(f, "Unit 0x{:08x} was referenced by executable but not found", unit)
+                write!(f, "Unit 0x{:08x} referenced by executable was not found", unit)
             }
             Error::NoOutputObjectCreated => write!(f, "No output object was created from inputs"),
             Error::MixedInputEncodings => write!(f, "Input objects haved mixed encodings"),

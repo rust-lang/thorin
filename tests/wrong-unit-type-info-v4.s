@@ -1,7 +1,7 @@
 # RUN: llvm-mc -triple x86_64-unknown-linux %s -filetype=obj -o %t.dwp
 # RUN: not thorin %t.dwp -o %t 2>&1 | FileCheck %s
 
-# CHECK: Error: Failed to add input object to DWARF package
+# CHECK: Error: Failed to add `{{.*}}/wrong-unit-type-info-v4.s.tmp.dwp` to DWARF package
 # CHECK:  0: Failed to parse unit
 # CHECK:  1: Hit the end of input before it was expected
 

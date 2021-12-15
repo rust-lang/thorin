@@ -2,5 +2,5 @@ RUN: rm -f %t
 RUN: not thorin %p/inputs/missing-dwo-id.dwo -o %t 2>&1 | FileCheck %s
 RUN: not ls %t
 
-CHECK: Error: Failed to add input object to DWARF package
-CHECK:  Found regular compilation unit in DWARF object (missing DWO id)
+CHECK: Error: Failed to add `{{.*}}/missing-dwo-id.dwo` to DWARF package
+CHECK:  Regular compilation unit in object (missing dwo identifier)

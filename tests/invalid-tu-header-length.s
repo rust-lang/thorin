@@ -2,7 +2,7 @@
 # RUN:   -dwarf-version=5
 # RUN: not thorin %t.dwo -o %t.dwp 2>&1 | FileCheck %s
 
-# CHECK: Error: Failed to add input object to DWARF package
+# CHECK: Error: Failed to add `{{.*}}/invalid-tu-header-length.s.tmp.dwo` to DWARF package
 # CHECK:  0: Failed to parse unit header
 # CHECK:  1: Hit the end of input before it was expected
 

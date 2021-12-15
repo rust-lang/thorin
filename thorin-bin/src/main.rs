@@ -18,20 +18,16 @@ use typed_arena::Arena;
 
 #[derive(Debug, Error)]
 enum Error {
-    #[error("Failed to add input object to DWARF package")]
-    AddInputObject,
-    #[error("Failed to add referenced DWARF object/packages from executable to DWARF package")]
-    AddExecutable,
-    #[error("Failed to create output object")]
-    CreateOutputFile,
-    #[error("Failed to finish creation of DWARF package")]
+    #[error("Failed to add `{0}` to DWARF package")]
+    AddInputObject(String),
+    #[error("Failed to add referenced DWARF object/packages from `{0}` to DWARF package")]
+    AddExecutable(String),
+    #[error("Failed to create output object file at `{0}`")]
+    CreateOutputFile(String),
+    #[error("Failed verifying final DWARF package")]
     Finish,
-    #[error("Failed to emit output object to buffer")]
+    #[error("Failed writing output object to output buffer")]
     EmitOutputObject,
-    #[error("Failed to write output object to buffer")]
-    WriteBuffer,
-    #[error("Failed to write output object to disk")]
-    FlushBufferedWriter,
 }
 
 #[derive(Debug, StructOpt)]
@@ -155,7 +151,9 @@ fn main() -> Result<()> {
     }
 
     for input in opt.inputs {
-        package.add_input_object(&input).context(Error::AddInputObject)?;
+        package
+            .add_input_object(&input)
+            .with_context(|| Error::AddInputObject(input.display().to_string()))?;
     }
 
     if let Some(executables) = opt.executables {
@@ -165,17 +163,18 @@ fn main() -> Result<()> {
             // input - calling `finish` will return an error in this case.
             package
                 .add_executable(&executable, thorin::MissingReferencedObjectBehaviour::Skip)
-                .context(Error::AddExecutable)?;
+                .with_context(|| Error::AddExecutable(executable.display().to_string()))?;
         }
     }
 
-    let output_stream = Output::new(opt.output.as_ref()).context(Error::CreateOutputFile)?;
+    let output_stream = Output::new(opt.output.as_ref())
+        .with_context(|| Error::CreateOutputFile(opt.output.display().to_string()))?;
     let mut output_stream = StreamingBuffer::new(BufWriter::new(output_stream));
     package
         .finish()
         .context(Error::Finish)?
         .emit(&mut output_stream)
         .context(Error::EmitOutputObject)?;
-    output_stream.result().context(Error::WriteBuffer)?;
-    output_stream.into_inner().flush().context(Error::FlushBufferedWriter)
+    output_stream.result().context(Error::EmitOutputObject)?;
+    output_stream.into_inner().flush().context(Error::EmitOutputObject)
 }

@@ -1,8 +1,8 @@
 # RUN: llvm-mc -triple x86_64-unknown-linux %s -filetype=obj -o %t.dwp
 # RUN: not thorin %t.dwp -o /dev/null 2>&1 | FileCheck %s
 
-# CHECK: Error: Failed to add input object to DWARF package
-# CHECK:  0: Failed to parse `.debug_cu_index` section
+# CHECK: Error: Failed to add `{{.*}}/multiple-debug-info-sections-in-dwp.s.tmp.dwp` to DWARF package
+# CHECK:  0: Failed to parse `.debug_cu_index` index section
 # CHECK:  1: Hit the end of input before it was expected
 
     .section	.debug_info.dwo,"G",@progbits,0xFDFDFDFD,comdat
