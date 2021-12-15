@@ -10,9 +10,7 @@ use tracing::debug;
 use crate::{
     error::{Error, Result},
     ext::CompressedDataRangeExt,
-    index::{
-        Bucketable, Contribution, ContributionOffset, CuIndexEntry, IndexCollection, TuIndexEntry,
-    },
+    index::{write_index, Bucketable, Contribution, ContributionOffset, IndexEntry},
     relocate::RelocationMap,
     strings::PackageStringTable,
     util::{
@@ -224,9 +222,9 @@ pub(crate) struct InProgressDwarfPackage<'file> {
     string_table: PackageStringTable<RunTimeEndian>,
 
     /// Compilation unit index entries (offsets + sizes) being accumulated.
-    cu_index_entries: Vec<CuIndexEntry>,
+    cu_index_entries: Vec<IndexEntry>,
     /// Type unit index entries (offsets + sizes) being accumulated.
-    tu_index_entries: Vec<TuIndexEntry>,
+    tu_index_entries: Vec<IndexEntry>,
 
     /// `DebugTypeSignature`s of type units and `DwoId`s of compilation units that have already
     /// been added to the output package.
@@ -380,33 +378,46 @@ impl<'file> InProgressDwarfPackage<'file> {
 
         // Create offset adjustor functions, see comment on `create_contribution_adjustor` for
         // explanation.
-        let mut abbrev_cu_adjustor =
-            create_contribution_adjustor(cu_index.as_ref(), gimli::SectionId::DebugAbbrev);
-        let mut line_cu_adjustor =
-            create_contribution_adjustor(cu_index.as_ref(), gimli::SectionId::DebugLine);
-        let mut loc_cu_adjustor =
-            create_contribution_adjustor(cu_index.as_ref(), gimli::SectionId::DebugLoc);
-        let mut loclists_cu_adjustor =
-            create_contribution_adjustor(cu_index.as_ref(), gimli::SectionId::DebugLocLists);
-        let mut rnglists_cu_adjustor =
-            create_contribution_adjustor(cu_index.as_ref(), gimli::SectionId::DebugRngLists);
-        let mut str_offsets_cu_adjustor =
-            create_contribution_adjustor(cu_index.as_ref(), gimli::SectionId::DebugStrOffsets);
-        let mut macinfo_cu_adjustor =
-            create_contribution_adjustor(cu_index.as_ref(), gimli::SectionId::DebugMacinfo);
-        let mut macro_cu_adjustor =
-            create_contribution_adjustor(cu_index.as_ref(), gimli::SectionId::DebugMacro);
-
-        let mut abbrev_tu_adjustor =
-            create_contribution_adjustor(tu_index.as_ref(), gimli::SectionId::DebugAbbrev);
-        let mut line_tu_adjustor =
-            create_contribution_adjustor(tu_index.as_ref(), gimli::SectionId::DebugLine);
-        let mut loclists_tu_adjustor =
-            create_contribution_adjustor(tu_index.as_ref(), gimli::SectionId::DebugLocLists);
-        let mut rnglists_tu_adjustor =
-            create_contribution_adjustor(tu_index.as_ref(), gimli::SectionId::DebugRngLists);
-        let mut str_offsets_tu_adjustor =
-            create_contribution_adjustor(tu_index.as_ref(), gimli::SectionId::DebugStrOffsets);
+        let mut abbrev_adjustor = create_contribution_adjustor(
+            cu_index.as_ref(),
+            tu_index.as_ref(),
+            gimli::SectionId::DebugAbbrev,
+        );
+        let mut line_adjustor = create_contribution_adjustor(
+            cu_index.as_ref(),
+            tu_index.as_ref(),
+            gimli::SectionId::DebugLine,
+        );
+        let mut loc_adjustor = create_contribution_adjustor(
+            cu_index.as_ref(),
+            tu_index.as_ref(),
+            gimli::SectionId::DebugLoc,
+        );
+        let mut loclists_adjustor = create_contribution_adjustor(
+            cu_index.as_ref(),
+            tu_index.as_ref(),
+            gimli::SectionId::DebugLocLists,
+        );
+        let mut rnglists_adjustor = create_contribution_adjustor(
+            cu_index.as_ref(),
+            tu_index.as_ref(),
+            gimli::SectionId::DebugRngLists,
+        );
+        let mut str_offsets_adjustor = create_contribution_adjustor(
+            cu_index.as_ref(),
+            tu_index.as_ref(),
+            gimli::SectionId::DebugStrOffsets,
+        );
+        let mut macinfo_adjustor = create_contribution_adjustor(
+            cu_index.as_ref(),
+            tu_index.as_ref(),
+            gimli::SectionId::DebugMacinfo,
+        );
+        let mut macro_adjustor = create_contribution_adjustor(
+            cu_index.as_ref(),
+            tu_index.as_ref(),
+            gimli::SectionId::DebugMacro,
+        );
 
         let mut seen_debug_info = false;
         let mut seen_debug_types = false;
@@ -497,62 +508,43 @@ impl<'file> InProgressDwarfPackage<'file> {
                     .map_err(Error::DecompressData)?
                     .ok_or(Error::EmptyUnit(id.index()))?;
 
+                let (debug_info, debug_types) = match id {
+                    DwarfObjectIdentifier::Type(_) if is_debug_types => {
+                        (None, self.obj.append_to_debug_types(data))
+                    }
+                    DwarfObjectIdentifier::Compilation(_) | DwarfObjectIdentifier::Type(_) => {
+                        (self.obj.append_to_debug_info(data), None)
+                    }
+                };
+
+                let debug_abbrev = abbrev_adjustor(id, debug_abbrev)?;
+                let debug_line = line_adjustor(id, debug_line)?;
+                let debug_loc = loc_adjustor(id, debug_loc)?;
+                let debug_loclists = loclists_adjustor(id, debug_loclists)?;
+                let debug_rnglists = rnglists_adjustor(id, debug_rnglists)?;
+                let debug_str_offsets = str_offsets_adjustor(id, debug_str_offsets)?;
+                let debug_macinfo = macinfo_adjustor(id, debug_macinfo)?;
+                let debug_macro = macro_adjustor(id, debug_macro)?;
+
+                let entry = IndexEntry {
+                    encoding,
+                    id,
+                    debug_info,
+                    debug_types,
+                    debug_abbrev,
+                    debug_line,
+                    debug_loc,
+                    debug_loclists,
+                    debug_rnglists,
+                    debug_str_offsets,
+                    debug_macinfo,
+                    debug_macro,
+                };
+                debug!(?entry);
+
                 match id {
-                    DwarfObjectIdentifier::Compilation(dwo_id) => {
-                        let debug_info =
-                            self.obj.append_to_debug_info(data).expect("no contribution from unit");
-
-                        let debug_abbrev = abbrev_cu_adjustor(dwo_id, debug_abbrev)?
-                            .ok_or(Error::MissingRequiredSection(".debug_abbrev.dwo"))?;
-                        let debug_line = line_cu_adjustor(dwo_id, debug_line)?;
-                        let debug_loc = loc_cu_adjustor(dwo_id, debug_loc)?;
-                        let debug_loclists = loclists_cu_adjustor(dwo_id, debug_loclists)?;
-                        let debug_rnglists = rnglists_cu_adjustor(dwo_id, debug_rnglists)?;
-                        let debug_str_offsets = str_offsets_cu_adjustor(dwo_id, debug_str_offsets)?;
-                        let debug_macinfo = macinfo_cu_adjustor(dwo_id, debug_macinfo)?;
-                        let debug_macro = macro_cu_adjustor(dwo_id, debug_macro)?;
-
-                        self.cu_index_entries.push(CuIndexEntry {
-                            encoding,
-                            dwo_id,
-                            debug_info,
-                            debug_abbrev,
-                            debug_line,
-                            debug_loc,
-                            debug_loclists,
-                            debug_rnglists,
-                            debug_str_offsets,
-                            debug_macinfo,
-                            debug_macro,
-                        });
-                    }
-                    DwarfObjectIdentifier::Type(type_signature) => {
-                        let debug_info_or_types = if is_debug_types {
-                            self.obj.append_to_debug_types(data)
-                        } else {
-                            self.obj.append_to_debug_info(data)
-                        }
-                        .expect("no contribution from unit");
-
-                        let debug_abbrev = abbrev_tu_adjustor(type_signature, debug_abbrev)?
-                            .ok_or(Error::MissingRequiredSection(".debug_abbrev.dwo"))?;
-                        let debug_line = line_tu_adjustor(type_signature, debug_line)?;
-                        let debug_loclists = loclists_tu_adjustor(type_signature, debug_loclists)?;
-                        let debug_rnglists = rnglists_tu_adjustor(type_signature, debug_rnglists)?;
-                        let debug_str_offsets =
-                            str_offsets_tu_adjustor(type_signature, debug_str_offsets)?;
-
-                        self.tu_index_entries.push(TuIndexEntry {
-                            encoding,
-                            type_signature,
-                            debug_info_or_types,
-                            debug_abbrev,
-                            debug_line,
-                            debug_loclists,
-                            debug_rnglists,
-                            debug_str_offsets,
-                        });
-                    }
+                    DwarfObjectIdentifier::Compilation(_) => self.cu_index_entries.push(entry),
+                    DwarfObjectIdentifier::Type(_) => self.tu_index_entries.push(entry),
                 }
                 self.contained_units.insert(id);
             }
@@ -574,10 +566,10 @@ impl<'file> InProgressDwarfPackage<'file> {
 
         // Write `.debug_{cu,tu}_index` sections to the object.
         debug!("writing cu index");
-        let cu_index_data = cu_index_entries.write_index(self.endian)?;
+        let cu_index_data = write_index(self.endian, &cu_index_entries)?;
         let _ = obj.append_to_debug_cu_index(cu_index_data.slice());
         debug!("writing tu index");
-        let tu_index_data = tu_index_entries.write_index(self.endian)?;
+        let tu_index_data = write_index(self.endian, &tu_index_entries)?;
         let _ = obj.append_to_debug_tu_index(tu_index_data.slice());
 
         Ok(obj.finish())
