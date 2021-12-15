@@ -1,14 +1,18 @@
 [package]
-name = "thorin-bin"
+name = "thorin-dwp-bin"
 authors = [ "David Wood <david.wood@huawei.com>" ]
-description = "Merge dwarf objects into dwarf packages"
-license = "Apache-2.0/MIT"
+categories = ["development-tools::debugging", "command-line-utilities"]
+description = "Merge DWARF objects and packages into DWARF packages"
+homepage = "https://github.com/davidtwco/thorin"
+keywords = ["dwarf", "split-dwarf", "dwarf-package", "dwarf-object", "dwp"]
+license = "MIT OR Apache-2.0"
 readme = "../README.md"
+repository = "https://github.com/davidtwco/thorin"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-thorin = { path = "../thorin" }
+thorin-dwp = { version = "0.1.0", path = "../thorin" }
 
 anyhow = "1.0.51"
 memmap2 = "0.5.0"
