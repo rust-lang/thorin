@@ -42,16 +42,18 @@ $ cargo build
 To run the tests, first install the relevant dependencies:
 
 ```shell-session
+$ apt install --no-install-recommends --yes llvm-13 llvm-13-tools
 $ pip install lit
-$ wget clang+llvm-13.0.0-x86_64-linux-gnu-ubuntu-20.04.tar.xz -O llvm.tar.xz # (you might want to update or change architecture)
-$ tar xvf llvm.tar.xz
 ```
 
-Next, run the `lit` testsuite, replacing `$LLVM` with the path to the extracted LLVM.
+Next, run the `lit` testsuite (replacing `/path/to/llvm/bin` with the correct path to your LLVM
+installation, if required):
 
 ```shell-session
-$ cargo build
-$ lit -v --path $PWD/target/debug/ --path $LLVM/build/bin/ ./tests
+$ cargo build # in debug mode..
+$ lit -v --path "$PWD/target/debug/:/path/to/llvm/bin/" ./tests
+$ cargo build --release # ..or in release mode
+$ lit -v --path "$PWD/target/release/:/path/to/llvm/bin/" ./tests
 ```
 
 We use `rustfmt` to automatically format and style all of our code. To install and use `rustfmt`:
