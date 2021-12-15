@@ -79,32 +79,39 @@ where
 /// This function returns a "contribution adjustor" closure, which adjusts the contribution's
 /// offset and size according to its contribution in the input's index and with an offset
 /// accumulated over all calls to the closure.
-pub(crate) fn create_contribution_adjustor<'input, Identifier, R: 'input>(
-    index: Option<&'input UnitIndex<R>>,
+pub(crate) fn create_contribution_adjustor<'input, R: 'input>(
+    cu_index: Option<&'input UnitIndex<R>>,
+    tu_index: Option<&'input UnitIndex<R>>,
     target_section_id: gimli::SectionId,
-) -> Box<dyn FnMut(Identifier, Option<Contribution>) -> Result<Option<Contribution>> + 'input>
+) -> Box<
+    dyn FnMut(DwarfObjectIdentifier, Option<Contribution>) -> Result<Option<Contribution>> + 'input,
+>
 where
-    Identifier: Bucketable,
     R: gimli::Reader,
 {
-    let mut adjustment = 0;
+    let mut cu_adjustment = 0;
+    let mut tu_adjustment = 0;
 
     Box::new(
-        move |identifier: Identifier,
+        move |identifier: DwarfObjectIdentifier,
               contribution: Option<Contribution>|
               -> Result<Option<Contribution>> {
-            match (&index, contribution) {
+            let (adjustment, index) = match identifier {
+                DwarfObjectIdentifier::Compilation(_) => (&mut cu_adjustment, &cu_index),
+                DwarfObjectIdentifier::Type(_) => (&mut tu_adjustment, &tu_index),
+            };
+            match (index, contribution) {
                 // dwp input with section
                 (Some(index), Some(contribution)) => {
-                    let identifier = identifier.index();
-                    let row_id = index.find(identifier).ok_or(Error::UnitNotInIndex(identifier))?;
+                    let idx = identifier.index();
+                    let row_id = index.find(idx).ok_or(Error::UnitNotInIndex(idx))?;
                     let section = index
                         .sections(row_id)
                         .map_err(|e| Error::RowNotInIndex(e, row_id))?
                         .find(|index_section| index_section.section == target_section_id)
                         .ok_or(Error::SectionNotInRow)?;
-                    let adjusted_offset: u64 = contribution.offset.0 + adjustment;
-                    adjustment += section.size as u64;
+                    let adjusted_offset: u64 = contribution.offset.0 + *adjustment;
+                    *adjustment += section.size as u64;
 
                     Ok(Some(Contribution {
                         offset: ContributionOffset(adjusted_offset),
