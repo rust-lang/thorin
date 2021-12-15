@@ -180,7 +180,7 @@ where
             let dwo_name = {
                 let mut cursor = unit.header.entries(&unit.abbreviations);
                 cursor.next_dfs()?;
-                let root = cursor.current().expect("unit without root debugging information entry");
+                let root = cursor.current().expect("unit w/out root debugging information entry");
 
                 let dwo_name = if let Some(val) = root.attr_value(gimli::DW_AT_dwo_name)? {
                     // DWARF 5

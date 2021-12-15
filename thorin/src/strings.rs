@@ -97,7 +97,7 @@ impl<E: gimli::Endianity> PackageStringTable<E> {
                     data.write_u32(
                         (section_size - 8)
                             .try_into()
-                            .expect("section size w/out header is out of range of u32"),
+                            .expect("section size w/out header larger than u32"),
                     )?;
                 }
                 Format::Dwarf64 => {
@@ -132,12 +132,12 @@ impl<E: gimli::Endianity> PackageStringTable<E> {
             match encoding.format {
                 Format::Dwarf32 => {
                     let dwp_offset =
-                        dwp_offset.0.try_into().expect("string offset too large for u32");
+                        dwp_offset.0.try_into().expect("string offset larger than u32");
                     data.write_u32(dwp_offset)?;
                 }
                 Format::Dwarf64 => {
                     let dwp_offset =
-                        dwp_offset.0.try_into().expect("string offset too large for u64");
+                        dwp_offset.0.try_into().expect("string offset larger than u64");
                     data.write_u64(dwp_offset)?;
                 }
             }

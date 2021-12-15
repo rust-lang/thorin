@@ -49,6 +49,8 @@ pub enum Error {
     MissingDwoName(u64),
     /// Input object has no compilation units.
     NoCompilationUnits,
+    /// No top-level debugging information entry in unit.
+    NoDie,
     /// Top-level debugging information entry is not a compilation/type unit.
     TopLevelDieNotUnit,
     /// Section name isn't UTF-8.
@@ -128,6 +130,7 @@ impl StdError for Error {
             Error::UnsupportedRelocation(_, _) => None,
             Error::MissingDwoName(_) => None,
             Error::NoCompilationUnits => None,
+            Error::NoDie => None,
             Error::TopLevelDieNotUnit => None,
             Error::NonUtf8SectionName(source) => Some(source.as_dyn_error()),
             Error::MissingRequiredSection(_) => None,
@@ -194,6 +197,9 @@ impl fmt::Display for Error {
             }
             Error::NoCompilationUnits => {
                 write!(f, "Input DWARF object has no compilation units")
+            }
+            Error::NoDie => {
+                write!(f, "No top-level debugging information entry in unit")
             }
             Error::TopLevelDieNotUnit => {
                 write!(f, "Top-level debugging information entry is not a compilation/type unit")
