@@ -13,7 +13,7 @@ use crate::{
     error::Result,
     ext::EndianityExt,
     index::Bucketable,
-    package::{dwo_identifier_of_unit, DwarfObjectIdentifier, InProgressDwarfPackage},
+    package::{dwo_identifier_of_unit, DwarfObject, InProgressDwarfPackage},
     relocate::{add_relocations, Relocate, RelocationMap},
 };
 
@@ -83,7 +83,7 @@ impl MissingReferencedObjectBehaviour {
 pub struct DwarfPackage<'output, 'session: 'output, Sess: Session<RelocationMap>> {
     sess: &'session Sess,
     maybe_in_progress: Option<InProgressDwarfPackage<'output>>,
-    targets: HashSet<DwarfObjectIdentifier>,
+    targets: HashSet<DwarfObject>,
 }
 
 impl<'output, 'session: 'output, Sess> fmt::Debug for DwarfPackage<'output, 'session, Sess>
@@ -207,7 +207,7 @@ where
             // appear to be a "skeleton type unit" to find the corresponding unit of (there are
             // normal type units in an executable, but should we expect to find a corresponding
             // split type unit for those?).
-            if matches!(target, DwarfObjectIdentifier::Compilation(_)) {
+            if matches!(target, DwarfObject::Compilation(_)) {
                 // Input objects are processed first, if a DWARF object referenced by this
                 // executable was already found then don't add it to the target and try to add it
                 // again.

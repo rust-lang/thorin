@@ -64,18 +64,18 @@ impl From<gimli::DebugTypeSignature> for DebugTypeSignature {
 
 /// Identifier for a DWARF object.
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum DwarfObjectIdentifier {
+pub(crate) enum DwarfObject {
     /// `DwoId` identifying compilation units.
     Compilation(DwoId),
     /// `DebugTypeSignature` identifying type units.
     Type(DebugTypeSignature),
 }
 
-impl Bucketable for DwarfObjectIdentifier {
+impl Bucketable for DwarfObject {
     fn index(&self) -> u64 {
         match *self {
-            DwarfObjectIdentifier::Compilation(dwo_id) => dwo_id.index(),
-            DwarfObjectIdentifier::Type(type_signature) => type_signature.index(),
+            DwarfObject::Compilation(dwo_id) => dwo_id.index(),
+            DwarfObject::Type(type_signature) => type_signature.index(),
         }
     }
 }
@@ -96,11 +96,11 @@ impl Bucketable for DwarfObjectIdentifier {
 pub(crate) fn dwo_identifier_of_unit<R: gimli::Reader>(
     debug_abbrev: &gimli::DebugAbbrev<R>,
     header: &gimli::UnitHeader<R>,
-) -> Result<Option<DwarfObjectIdentifier>> {
+) -> Result<Option<DwarfObject>> {
     match header.type_() {
         // Compilation units with DWARF 5
         UnitType::Skeleton(dwo_id) | UnitType::SplitCompilation(dwo_id) => {
-            Ok(Some(DwarfObjectIdentifier::Compilation(dwo_id.into())))
+            Ok(Some(DwarfObject::Compilation(dwo_id.into())))
         }
         // Compilation units with GNU Extension
         UnitType::Compilation => {
@@ -117,7 +117,7 @@ pub(crate) fn dwo_identifier_of_unit<R: gimli::Reader>(
             while let Some(attr) = attrs.next().map_err(Error::ParseUnitAttribute)? {
                 match (attr.name(), attr.value()) {
                     (gimli::constants::DW_AT_GNU_dwo_id, gimli::AttributeValue::DwoId(dwo_id)) => {
-                        return Ok(Some(DwarfObjectIdentifier::Compilation(dwo_id.into())))
+                        return Ok(Some(DwarfObject::Compilation(dwo_id.into())))
                     }
                     _ => (),
                 }
@@ -127,12 +127,10 @@ pub(crate) fn dwo_identifier_of_unit<R: gimli::Reader>(
         }
         // Type units with DWARF 5
         UnitType::SplitType { type_signature, .. } => {
-            Ok(Some(DwarfObjectIdentifier::Type(type_signature.into())))
+            Ok(Some(DwarfObject::Type(type_signature.into())))
         }
         // Type units with GNU extension
-        UnitType::Type { type_signature, .. } => {
-            Ok(Some(DwarfObjectIdentifier::Type(type_signature.into())))
-        }
+        UnitType::Type { type_signature, .. } => Ok(Some(DwarfObject::Type(type_signature.into()))),
         // Wrong compilation unit type.
         _ => Ok(None),
     }
@@ -217,9 +215,7 @@ pub(crate) fn create_contribution_adjustor<'input, R: 'input>(
     cu_index: Option<&'input UnitIndex<R>>,
     tu_index: Option<&'input UnitIndex<R>>,
     target_section_id: gimli::SectionId,
-) -> Box<
-    dyn FnMut(DwarfObjectIdentifier, Option<Contribution>) -> Result<Option<Contribution>> + 'input,
->
+) -> Box<dyn FnMut(DwarfObject, Option<Contribution>) -> Result<Option<Contribution>> + 'input>
 where
     R: gimli::Reader,
 {
@@ -227,12 +223,12 @@ where
     let mut tu_adjustment = 0;
 
     Box::new(
-        move |identifier: DwarfObjectIdentifier,
+        move |identifier: DwarfObject,
               contribution: Option<Contribution>|
               -> Result<Option<Contribution>> {
             let (adjustment, index) = match identifier {
-                DwarfObjectIdentifier::Compilation(_) => (&mut cu_adjustment, &cu_index),
-                DwarfObjectIdentifier::Type(_) => (&mut tu_adjustment, &tu_index),
+                DwarfObject::Compilation(_) => (&mut cu_adjustment, &cu_index),
+                DwarfObject::Type(_) => (&mut tu_adjustment, &tu_index),
             };
             match (index, contribution) {
                 // dwp input with section
@@ -397,7 +393,7 @@ pub(crate) struct InProgressDwarfPackage<'file> {
     /// Used when adding new TU index entries to de-duplicate type units (as required by the
     /// specification). Also used to check that all dwarf objects referenced by executables
     /// have been found.
-    contained_units: HashSet<DwarfObjectIdentifier>,
+    contained_units: HashSet<DwarfObject>,
 }
 
 impl<'file> InProgressDwarfPackage<'file> {
@@ -419,7 +415,7 @@ impl<'file> InProgressDwarfPackage<'file> {
         }
     }
 
-    pub(crate) fn contained_units(&self) -> &HashSet<DwarfObjectIdentifier> {
+    pub(crate) fn contained_units(&self) -> &HashSet<DwarfObject> {
         &self.contained_units
     }
 
@@ -630,13 +626,13 @@ impl<'file> InProgressDwarfPackage<'file> {
                         return Err(Error::NotSplitUnit);
                     }
                     // Report an error when a duplicate compilation unit is found.
-                    Some(id @ DwarfObjectIdentifier::Compilation(dwo_id))
+                    Some(id @ DwarfObject::Compilation(dwo_id))
                         if self.contained_units.contains(&id) =>
                     {
                         return Err(Error::DuplicateUnit(dwo_id.0));
                     }
                     // Skip duplicate type units, these happen during proper operation of `thorin`.
-                    Some(id @ DwarfObjectIdentifier::Type(type_sig))
+                    Some(id @ DwarfObject::Type(type_sig))
                         if self.contained_units.contains(&id) =>
                     {
                         debug!(?type_sig, "skipping duplicate type unit, already seen");
@@ -650,14 +646,14 @@ impl<'file> InProgressDwarfPackage<'file> {
                     .try_into()
                     .expect("unit header length bigger than u64");
                 let offset = match id {
-                    DwarfObjectIdentifier::Type(_) if is_debug_types => {
+                    DwarfObject::Type(_) if is_debug_types => {
                         header
                             .offset()
                             .as_debug_types_offset()
                             .expect("unit w/out debug info offset")
                             .0
                     }
-                    DwarfObjectIdentifier::Compilation(_) | DwarfObjectIdentifier::Type(_) => {
+                    DwarfObject::Compilation(_) | DwarfObject::Type(_) => {
                         header
                             .offset()
                             .as_debug_info_offset()
@@ -672,10 +668,10 @@ impl<'file> InProgressDwarfPackage<'file> {
                     .ok_or(Error::EmptyUnit(id.index()))?;
 
                 let (debug_info, debug_types) = match id {
-                    DwarfObjectIdentifier::Type(_) if is_debug_types => {
+                    DwarfObject::Type(_) if is_debug_types => {
                         (None, self.obj.append_to_debug_types(data))
                     }
-                    DwarfObjectIdentifier::Compilation(_) | DwarfObjectIdentifier::Type(_) => {
+                    DwarfObject::Compilation(_) | DwarfObject::Type(_) => {
                         (self.obj.append_to_debug_info(data), None)
                     }
                 };
@@ -706,8 +702,8 @@ impl<'file> InProgressDwarfPackage<'file> {
                 debug!(?entry);
 
                 match id {
-                    DwarfObjectIdentifier::Compilation(_) => self.cu_index_entries.push(entry),
-                    DwarfObjectIdentifier::Type(_) => self.tu_index_entries.push(entry),
+                    DwarfObject::Compilation(_) => self.cu_index_entries.push(entry),
+                    DwarfObject::Type(_) => self.tu_index_entries.push(entry),
                 }
                 self.contained_units.insert(id);
             }

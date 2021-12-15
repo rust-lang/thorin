@@ -9,7 +9,7 @@ use tracing::{debug, trace};
 use crate::{
     error::{Error, Result},
     ext::PackageFormatExt,
-    package::DwarfObjectIdentifier,
+    package::DwarfObject,
 };
 
 /// Helper trait for types that can be used in creating the `.debug_{cu,tu}_index` hash table.
@@ -76,7 +76,7 @@ pub(crate) struct Contribution {
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct IndexEntry {
     pub(crate) encoding: Encoding,
-    pub(crate) id: DwarfObjectIdentifier,
+    pub(crate) id: DwarfObject,
     pub(crate) debug_info: Option<Contribution>,
     pub(crate) debug_types: Option<Contribution>,
     pub(crate) debug_abbrev: Option<Contribution>,
