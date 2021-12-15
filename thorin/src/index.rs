@@ -20,7 +20,7 @@ pub(crate) trait Bucketable {
 /// Returns a hash table computed for `elements`. Used in the `.debug_{cu,tu}_index` sections.
 #[tracing::instrument(level = "trace", skip_all)]
 fn bucket<B: Bucketable + fmt::Debug>(elements: &[B]) -> Vec<u32> {
-    let unit_count: u32 = elements.len().try_into().expect("unit count too big for u32");
+    let unit_count: u32 = elements.len().try_into().expect("unit count larger than u32");
     let num_buckets = if elements.len() < 2 { 2 } else { (3 * unit_count / 2).next_power_of_two() };
     let mask: u64 = num_buckets as u64 - 1;
     trace!(?mask);

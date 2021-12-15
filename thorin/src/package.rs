@@ -108,7 +108,7 @@ pub(crate) fn dwo_identifier_of_unit<R: gimli::Reader>(
                 header.abbreviations(&debug_abbrev).map_err(Error::ParseUnitAbbreviations)?;
             let mut cursor = header.entries(&abbreviations);
             cursor.next_dfs()?;
-            let root = cursor.current().expect("unit without root debugging information entry");
+            let root = cursor.current().ok_or(Error::NoDie)?;
             match root.tag() {
                 gimli::DW_TAG_compile_unit | gimli::DW_TAG_type_unit => (),
                 _ => return Err(Error::TopLevelDieNotUnit),
