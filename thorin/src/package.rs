@@ -1,6 +1,6 @@
 use std::{collections::HashSet, fmt};
 
-use gimli::{Encoding, RunTimeEndian, UnitHeader, UnitIndex, UnitType};
+use gimli::{Encoding, RunTimeEndian, UnitHeader, UnitIndex, UnitSectionOffset, UnitType};
 use object::{
     write::{Object as WritableObject, SectionId},
     BinaryFormat, Object, ObjectSection, SectionKind,
@@ -471,7 +471,7 @@ impl<'file> InProgressDwarfPackage<'file> {
         // Iterate over sections rather than using `section_by_name` because sections can be
         // repeated.
         for section in input.sections() {
-            match section.name().unwrap() {
+            match section.name().map_err(Error::NonUtf8SectionName)? {
                 ".debug_abbrev.dwo" | ".zdebug_abbrev.dwo" => {
                     let data = section.compressed_data()?.decompress()?;
                     update!(debug_abbrev += self.obj.append_to_debug_abbrev(&data));
@@ -590,7 +590,7 @@ impl<'file> InProgressDwarfPackage<'file> {
 
         for section in input.sections() {
             let data = section.compressed_data()?.decompress()?;
-            let (is_debug_types, mut iter) = match section.name().unwrap() {
+            let (is_debug_types, mut iter) = match section.name().map_err(Error::NonUtf8SectionName)? {
                 ".debug_info.dwo" | ".zdebug_info.dwo"
                     // Report an error if a input DWARF package has multiple `.debug_info`
                     // sections.
@@ -651,26 +651,18 @@ impl<'file> InProgressDwarfPackage<'file> {
                 let size: u64 = header
                     .length_including_self()
                     .try_into()
-                    .expect("unit header length bigger than u64");
-                let offset = match id {
-                    DwarfObject::Type(_) if is_debug_types => {
-                        header
-                            .offset()
-                            .as_debug_types_offset()
-                            .expect("unit w/out debug info offset")
-                            .0
-                    }
-                    DwarfObject::Compilation(_) | DwarfObject::Type(_) => {
-                        header
-                            .offset()
-                            .as_debug_info_offset()
-                            .expect("unit w/out debug info offset")
-                            .0
-                    }
+                    .expect("unit header length larger than u64");
+                let offset = match header.offset() {
+                    UnitSectionOffset::DebugInfoOffset(offset) => offset.0,
+                    UnitSectionOffset::DebugTypesOffset(offset) => offset.0,
                 };
 
                 let data = section
-                    .compressed_data_range(sess, offset.try_into().unwrap(), size)
+                    .compressed_data_range(
+                        sess,
+                        offset.try_into().expect("offset larger than u64"),
+                        size,
+                    )
                     .map_err(Error::DecompressData)?
                     .ok_or(Error::EmptyUnit(id.index()))?;
 

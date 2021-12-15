@@ -51,6 +51,8 @@ pub enum Error {
     NoCompilationUnits,
     /// Top-level debugging information entry is not a compilation/type unit.
     TopLevelDieNotUnit,
+    /// Section name isn't UTF-8.
+    NonUtf8SectionName(object::Error),
     /// Section required of input DWARF objects was missing.
     MissingRequiredSection(&'static str),
     /// Failed to parse unit abbreviations.
@@ -127,6 +129,7 @@ impl StdError for Error {
             Error::MissingDwoName(_) => None,
             Error::NoCompilationUnits => None,
             Error::TopLevelDieNotUnit => None,
+            Error::NonUtf8SectionName(source) => Some(source.as_dyn_error()),
             Error::MissingRequiredSection(_) => None,
             Error::ParseUnitAbbreviations(source) => Some(source.as_dyn_error()),
             Error::ParseUnitAttribute(source) => Some(source.as_dyn_error()),
@@ -194,6 +197,9 @@ impl fmt::Display for Error {
             }
             Error::TopLevelDieNotUnit => {
                 write!(f, "Top-level debugging information entry is not a compilation/type unit")
+            }
+            Error::NonUtf8SectionName(_) => {
+                write!(f, "Section name is not valid UTF-8")
             }
             Error::MissingRequiredSection(section) => {
                 write!(f, "Input DWARF object missing required section `{}`", section)
