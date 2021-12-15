@@ -1,16 +1,12 @@
-# This test checks if thorin can find the compilation unit if
-# both type and compile units are available in the debug info section (v5)
-
-# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj --split-dwarf-file=%t.dwo -dwarf-version=5 %s -o %t.o
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj --split-dwarf-file=%t.dwo \
+# RUN:   -dwarf-version=5 %s -o %t.o
 # RUN: thorin %t.dwo -o %t.dwp
 # RUN: llvm-dwarfdump -debug-info -debug-tu-index %t.dwp | FileCheck %s
-
-## Note: For this test we do not need to define the DIE for the structure type, as we only want to
-## have the info on the type and compile units.
 
 # CHECK-DAG: .debug_info.dwo contents
 # CHECK: 0x00000000: Type Unit: length = 0x00000017, format = DWARF32, version = 0x0005, unit_type = DW_UT_split_type, abbr_offset = 0x0000, addr_size = 0x08, name = '', type_signature = {{.*}}, type_offset = 0x0019 (next unit at 0x0000001b)
 # CHECK: 0x0000001b: Compile Unit: length = 0x00000011, format = DWARF32, version = 0x0005, unit_type = DW_UT_split_compile, abbr_offset = 0x0000, addr_size = 0x08, DWO_id = {{.*}} (next unit at 0x00000030)
+
     .section	.debug_info.dwo,"e",@progbits
     .long	.Ldebug_info_dwo_end0-.Ldebug_info_dwo_start0 # Length of Unit
 .Ldebug_info_dwo_start0:

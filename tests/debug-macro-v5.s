@@ -1,6 +1,5 @@
-# This test checks the support for writing macro sections and their index (v5).
-
-# RUN: llvm-mc -triple x86_64-unknown-linux --filetype=obj --split-dwarf-file=%t.dwo -dwarf-version=5 %s -o %t.o
+# RUN: llvm-mc -triple x86_64-unknown-linux --filetype=obj --split-dwarf-file=%t.dwo \
+# RUN:   -dwarf-version=5 %s -o %t.o
 # RUN: thorin %t.dwo -o %t.dwp 2>&1
 # RUN: llvm-dwarfdump -debug-macro -debug-cu-index %t.dwp | FileCheck %s
 

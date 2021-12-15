@@ -1,6 +1,7 @@
 ; RUN: rm -rf %t
 ; RUN: mkdir -p %t
-; RUN: llc %s -mtriple=x86_64-linux --split-dwarf-file=%t/test.dwo --split-dwarf-output=%t/test.dwo --filetype=obj -o %t/test.o
+; RUN: llc %s -mtriple=x86_64-linux --split-dwarf-file=%t/test.dwo \
+; RUN:   --split-dwarf-output=%t/test.dwo --filetype=obj -o %t/test.o
 ; RUN: llvm-dwarfdump -v %t/test.dwo | FileCheck %s -DPATH=%t
 ; RUN: thorin -e %t/test.o -o %t/test.dwp
 ; RUN: llvm-dwarfdump -v %t/test.dwp | FileCheck %s -DPATH=%t

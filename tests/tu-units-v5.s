@@ -1,12 +1,7 @@
-# This test checks if thorin can correctly generate the tu index section (v5).
-
 # RUN: llvm-mc -triple x86_64-unknown-linux %s -filetype=obj -o %t.o \
-# RUN:         -split-dwarf-file=%t.dwo -dwarf-version=5
+# RUN:   -split-dwarf-file=%t.dwo -dwarf-version=5
 # RUN: thorin %t.dwo -o %t.dwp
 # RUN: llvm-dwarfdump -debug-info -debug-tu-index %t.dwp | FileCheck %s
-
-## Note: In order to check whether the type unit index is generated
-## there is no need to add the missing DIEs for the structure type of the type unit.
 
 # CHECK-DAG: .debug_info.dwo contents:
 # CHECK: 0x00000000: Type Unit: length = 0x00000017, format = DWARF32, version = 0x0005, unit_type = DW_UT_split_type, abbr_offset = 0x0000, addr_size = 0x08, name = '', type_signature = [[TUID1:.*]], type_offset = 0x0019 (next unit at 0x0000001b)

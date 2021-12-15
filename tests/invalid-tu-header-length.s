@@ -1,5 +1,5 @@
 # RUN: llvm-mc -triple x86_64-unknown-linux %s -filetype=obj -o %t.o -split-dwarf-file=%t.dwo \
-# RUN:     -dwarf-version=5
+# RUN:   -dwarf-version=5
 # RUN: not thorin %t.dwo -o %t.dwp 2>&1 | FileCheck %s
 
 # CHECK: Error: Failed to add input object to DWARF package
