@@ -1,0 +1,70 @@
+RUN: rm -rf %t
+RUN: mkdir %t
+RUN: cd %t
+RUN: llvm-ar q inputs.ar \
+RUN:    %p/inputs/dwos-list-from-exec-a.dwo \
+RUN:    %p/inputs/dwos-list-from-exec-b.dwo \
+RUN:    %p/inputs/dwos-list-from-exec-c.dwo \
+RUN:    %p/inputs/dwos-list-from-exec-d.dwo \
+RUN:    %p/inputs/dwos-list-from-exec-e.dwo \
+RUN:    %p/archive-with-arbitrary.test
+RUN: thorin inputs.ar \
+RUN:    -e %p/inputs/dwos-list-from-exec-main \
+RUN:    -e %p/inputs/dwos-list-from-exec-libd.so -o - | llvm-dwarfdump -v - | FileCheck %s
+
+CHECK-LABEL: .debug_abbrev.dwo contents:
+
+CHECK-LABEL: Abbrev table for offset:
+CHECK: DW_TAG_compile_unit
+CHECK: DW_TAG_subprogram
+
+CHECK-LABEL: Abbrev table for offset:
+CHECK: DW_TAG_compile_unit
+CHECK: DW_TAG_subprogram
+
+CHECK-LABEL: Abbrev table for offset:
+CHECK: DW_TAG_compile_unit
+CHECK: DW_TAG_subprogram
+
+CHECK-LABEL: Abbrev table for offset:
+CHECK: DW_TAG_compile_unit
+CHECK: DW_TAG_subprogram
+
+CHECK-LABEL: Abbrev table for offset:
+CHECK: DW_TAG_compile_unit
+CHECK: DW_TAG_subprogram
+
+CHECK: .debug_info.dwo contents:
+CHECK: [[AOFF:0x[0-9a-f]*]]:
+
+CHECK-LABEL: Compile Unit: length = {{.*}}, version = 0x0004
+CHECK: DW_TAG_compile_unit
+CHECK:   DW_AT_name {{.*}} "a.cpp"
+CHECK:   DW_TAG_subprogram
+CHECK:     DW_AT_name {{.*}} "a"
+
+CHECK-LABEL: Compile Unit: length = {{.*}}, version = 0x0004
+CHECK: DW_TAG_compile_unit
+CHECK:   DW_AT_name {{.*}} "b.cpp"
+CHECK:   DW_TAG_subprogram
+CHECK:     DW_AT_name {{.*}} "b"
+CHECK:   DW_TAG_subprogram
+CHECK:     DW_AT_name {{.*}} "main"
+
+CHECK-LABEL: Compile Unit: length = {{.*}}, version = 0x0004
+CHECK: DW_TAG_compile_unit
+CHECK:   DW_AT_name {{.*}} "c.cpp"
+CHECK:   DW_TAG_subprogram
+CHECK:     DW_AT_name {{.*}} "c"
+
+CHECK-LABEL: Compile Unit: length = {{.*}}, version = 0x0004
+CHECK: DW_TAG_compile_unit
+CHECK:   DW_AT_name {{.*}} "d.cpp"
+CHECK:   DW_TAG_subprogram
+CHECK:     DW_AT_name {{.*}} "d"
+
+CHECK-LABEL: Compile Unit: length = {{.*}}, version = 0x0004
+CHECK: DW_TAG_compile_unit
+CHECK:   DW_AT_name {{.*}} "e.cpp"
+CHECK:   DW_TAG_subprogram
+CHECK:     DW_AT_name {{.*}} "e"

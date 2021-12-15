@@ -265,7 +265,13 @@ where
                     let member = member.map_err(Error::ParseArchiveMember)?;
                     let data = member.data(data)?;
 
-                    let kind = FileKind::parse(data).map_err(Error::ParseFileKind)?;
+                    let kind = if let Ok(kind) = FileKind::parse(data) {
+                        kind
+                    } else {
+                        trace!("skipping non-elf archive member");
+                        continue;
+                    };
+
                     trace!(?kind, "archive member");
                     match kind {
                         FileKind::Elf32 | FileKind::Elf64 => {
