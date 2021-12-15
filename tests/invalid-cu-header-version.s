@@ -5,5 +5,6 @@
 # CHECK: Error: Failed to add input object to DWARF package
 # CHECK:  0: Failed to parse unit header
 # CHECK:  1: Hit the end of input before it was expected
+
     .section	.debug_info.dwo,"e",@progbits
     .long	0 # Length of Unit

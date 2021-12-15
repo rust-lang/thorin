@@ -1,7 +1,5 @@
-# This test checks if thorin outputs .debug_rnglists.
-
 # RUN: llvm-mc -triple x86_64-unknown-linux %s -filetype=obj -o %t.o \
-# RUN:         -split-dwarf-file=%t.dwo -dwarf-version=5
+# RUN:   -split-dwarf-file=%t.dwo -dwarf-version=5
 # RUN: thorin %t.dwo -o %t.dwp
 # RUN: llvm-dwarfdump -debug-rnglists -debug-cu-index -debug-tu-index %t.dwp | FileCheck %s
 

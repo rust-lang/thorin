@@ -4,10 +4,6 @@ RUN: llvm-dwarfdump --verbose %t 2>/dev/null | FileCheck --check-prefix=READ_STR
 RUN: not thorin %p/inputs/handle-strx-v5.dwo %p/inputs/handle-strx-v5.dwo -o %t 2>&1 \
 RUN:   | FileCheck --check-prefix=PARSE_STRX %s
 
-
-dw5.o is compiled from a file that contains a single empty void function,
-with options -gdwarf-5 and -gsplit-dwarf.
-
 READ_STRX: DW_AT_name [DW_FORM_strx1]{{.*}}dw5.cc
 
 PARSE_STRX: Error: Failed to add input object to DWARF package

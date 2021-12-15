@@ -1,12 +1,10 @@
-# this checks thorin handling of DWARFv5 Info section header.
-
 # RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj --split-dwarf-file=%t.dwo -dwarf-version=5 %s -o %t.o
 
 # RUN: thorin %t.dwo -o %t.dwp
 # RUN: llvm-dwarfdump -v %t.dwp | FileCheck %s
 
-#CHECK-DAG: .debug_info.dwo contents:
-#CHECK: 0x00000000: Compile Unit: length = 0x00000050, format = DWARF32, version = 0x0005, unit_type = DW_UT_split_compile, abbr_offset = 0x0000, addr_size = 0x08, DWO_id = [[DWOID:.*]] (next unit at 0x00000054)
+# CHECK-DAG: .debug_info.dwo contents:
+# CHECK: 0x00000000: Compile Unit: length = 0x00000050, format = DWARF32, version = 0x0005, unit_type = DW_UT_split_compile, abbr_offset = 0x0000, addr_size = 0x08, DWO_id = [[DWOID:.*]] (next unit at 0x00000054)
 
 # CHECK-DAG: .debug_cu_index contents:
 # CHECK: version = 5, units = 1, slots = 2

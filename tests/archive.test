@@ -2,17 +2,17 @@ RUN: rm -rf %t
 RUN: mkdir %t
 RUN: cd %t
 RUN: llvm-ar q inputs.ar \
-RUN:    %p/inputs/dwos-list-from-exec-a.dwo \
-RUN:    %p/inputs/dwos-list-from-exec-b.dwo \
-RUN:    %p/inputs/dwos-list-from-exec-c.dwo \
-RUN:    %p/inputs/dwos-list-from-exec-d.dwo \
-RUN:    %p/inputs/dwos-list-from-exec-e.dwo
+RUN:   %p/inputs/dwos-list-from-exec-a.dwo \
+RUN:   %p/inputs/dwos-list-from-exec-b.dwo \
+RUN:   %p/inputs/dwos-list-from-exec-c.dwo \
+RUN:   %p/inputs/dwos-list-from-exec-d.dwo \
+RUN:   %p/inputs/dwos-list-from-exec-e.dwo
 RUN: thorin inputs.ar \
-RUN:    -e %p/inputs/dwos-list-from-exec-main \
-RUN:    -e %p/inputs/dwos-list-from-exec-libd.so -o - | llvm-dwarfdump -v - | FileCheck %s
+RUN:   -e %p/inputs/dwos-list-from-exec-main \
+RUN:   -e %p/inputs/dwos-list-from-exec-libd.so -o - | llvm-dwarfdump -v - | FileCheck %s
 RUN: not thorin \
-RUN:    -e %p/inputs/dwos-list-from-exec-main \
-RUN:    -e %p/inputs/dwos-list-from-exec-libd.so -o - 2>&1 | FileCheck --check-prefix=MISSING %s
+RUN:   -e %p/inputs/dwos-list-from-exec-main \
+RUN:   -e %p/inputs/dwos-list-from-exec-libd.so -o - 2>&1 | FileCheck --check-prefix=MISSING %s
 
 CHECK-LABEL: .debug_abbrev.dwo contents:
 
