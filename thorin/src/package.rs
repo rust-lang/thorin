@@ -136,6 +136,7 @@ pub(crate) fn dwo_identifier_of_unit<R: gimli::Reader>(
     }
 }
 
+/// Wrapper around `.debug_info.dwo` and `debug_types.dwo` unit iterators for uniform handling.
 enum UnitHeaderIterator<R: gimli::Reader> {
     DebugInfo(gimli::read::DebugInfoUnitHeadersIter<R>),
     DebugTypes(gimli::read::DebugTypesUnitHeadersIter<R>),
@@ -259,6 +260,8 @@ where
     )
 }
 
+/// Wrapper around `object::write::Object` that keeps track of the section indexes relevant to
+/// DWARF packaging.
 struct DwarfPackageObject<'file> {
     /// Object file being created.
     obj: WritableObject<'file>,
@@ -291,6 +294,7 @@ struct DwarfPackageObject<'file> {
     debug_macro: Option<SectionId>,
 }
 
+/// Macro for generating helper functions which appending non-empty data to specific sections.
 macro_rules! generate_append_for {
     ( $( $fn_name:ident => ($name:ident, $section_name:expr) ),+ ) => {
         $(
@@ -325,6 +329,7 @@ macro_rules! generate_append_for {
 }
 
 impl<'file> DwarfPackageObject<'file> {
+    /// Create a new `DwarfPackageObject` from an architecture and endianness.
     #[tracing::instrument(level = "trace")]
     pub(crate) fn new(
         architecture: object::Architecture,
@@ -365,6 +370,7 @@ impl<'file> DwarfPackageObject<'file> {
         append_to_debug_types => (debug_types, ".debug_types.dwo")
     }
 
+    /// Return the DWARF package object file.
     pub(crate) fn finish(self) -> WritableObject<'file> {
         self.obj
     }
@@ -415,12 +421,13 @@ impl<'file> InProgressDwarfPackage<'file> {
         }
     }
 
+    /// Returns the units contained within the DWARF package.
     pub(crate) fn contained_units(&self) -> &HashSet<DwarfObject> {
         &self.contained_units
     }
 
-    /// Process a DWARF object. Copies relevant sections, compilation/type units and strings from
-    /// DWARF object into output object.
+    /// Process an input DWARF object. Copies relevant sections, compilation/type units and strings
+    /// from DWARF object into output object.
     #[tracing::instrument(level = "trace", skip(sess, input,))]
     pub(crate) fn add_input_object<'input, 'session: 'input>(
         &mut self,
@@ -717,6 +724,7 @@ impl<'file> InProgressDwarfPackage<'file> {
         Ok(())
     }
 
+    /// Return the DWARF package object being created, writing any final sections.
     pub(crate) fn finish(self) -> Result<WritableObject<'file>> {
         let Self { mut obj, string_table, cu_index_entries, tu_index_entries, .. } = self;
 

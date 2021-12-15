@@ -3,6 +3,7 @@ use std::fmt;
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
+/// Helper trait for converting an error to a `&dyn std::error::Error`.
 pub trait AsDynError<'a> {
     fn as_dyn_error(&self) -> &(dyn StdError + 'a);
 }
