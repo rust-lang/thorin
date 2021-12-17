@@ -424,8 +424,10 @@ impl<'file> InProgressDwarfPackage<'file> {
         &self.contained_units
     }
 
-    /// Process an input DWARF object. Copies relevant sections, compilation/type units and strings
-    /// from DWARF object into output object.
+    /// Process an input DWARF object.
+    ///
+    /// Copies relevant debug sections, compilation/type units and strings from the `input` DWARF
+    /// object into this DWARF package.
     #[tracing::instrument(level = "trace", skip(sess, input,))]
     pub(crate) fn add_input_object<'input, 'session: 'input>(
         &mut self,

@@ -22,6 +22,8 @@ pub(crate) trait CompressedDataRangeExt<'input, 'session: 'input>:
     ObjectSection<'input>
 {
     /// Return the decompressed contents of the section data in the given range.
+    ///
+    /// Decompression happens only if the data is compressed.
     fn compressed_data_range(
         &self,
         sess: &'session impl Session<RelocationMap>,
@@ -96,7 +98,9 @@ impl<'input, Endian: gimli::Endianity> IndexSectionExt<'input, Endian, EndianSli
 pub(crate) trait PackageFormatExt {
     /// Returns `true` if this `Encoding` would produce to a DWARF 5-standardized package file.
     ///
-    /// See Sec 7.3.5 and Appendix F of [DWARF specification](https://dwarfstd.org/doc/DWARF5.pdf).
+    /// See Sec 7.3.5 and Appendix F of the [DWARF specification].
+    ///
+    /// [DWARF specification]: https://dwarfstd.org/doc/DWARF5.pdf
     fn is_std_dwarf_package_format(&self) -> bool;
 
     /// Returns `true` if this `Encoding` would produce a GNU Extension DWARF package file
