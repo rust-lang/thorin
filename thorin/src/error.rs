@@ -19,12 +19,14 @@ impl<'a, T: StdError + 'a> AsDynError<'a> for T {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// Failure to read input file, this error occurs in the `Session::read_input` function
-    /// provided by the user of `thorin`.
+    /// Failure to read input file.
+    ///
+    /// This error occurs in the `Session::read_input` function provided by the user of `thorin`.
     ReadInput(std::io::Error),
-    /// Failed to parse kind of input file. Input file kind is necessary to determine how to parse
-    /// the rest of the input, and to validate that the input file is of a type that `thorin` can
-    /// process.
+    /// Failed to parse kind of input file.
+    ///
+    /// Input file kind is necessary to determine how to parse the rest of the input, and to
+    /// validate that the input file is of a type that `thorin` can process.
     ParseFileKind(object::Error),
     /// Failed to parse object file.
     ParseObjectFile(object::Error),
@@ -32,10 +34,14 @@ pub enum Error {
     ParseArchiveFile(object::Error),
     /// Failed to parse archive member.
     ParseArchiveMember(object::Error),
-    /// Invalid kind of input. Only archive and elf files are supported input files.
+    /// Invalid kind of input.
+    ///
+    /// Only archive and elf files are supported input files.
     InvalidInputKind,
-    /// Failed to decompress data. `thorin` uses `object` for decompression, so `object` probably
-    /// didn't have support for the type of compression used.
+    /// Failed to decompress data.
+    ///
+    /// `thorin` uses `object` for decompression, so `object` probably didn't have support for the
+    /// type of compression used.
     DecompressData(object::Error),
     /// Section without a name.
     NamelessSection(object::Error, usize),
@@ -43,7 +49,7 @@ pub enum Error {
     RelocationWithInvalidSymbol(String, usize),
     /// Multiple relocations for a section.
     MultipleRelocations(String, usize),
-    /// Unsupport relocations for a section.
+    /// Unsupported relocations for a section.
     UnsupportedRelocation(String, usize),
     /// Input object that has a `DwoId` (or `DebugTypeSignature`) does not have a
     /// `DW_AT_GNU_dwo_name` or `DW_AT_dwo_name` attribute.
@@ -72,8 +78,10 @@ pub enum Error {
     OffsetAtIndex(gimli::read::Error, u64),
     /// Failed to read string from `.debug_str` at offset.
     StrAtOffset(gimli::read::Error, usize),
-    /// Failed to parse index section. If an input file is a DWARF package, its index section needs
-    /// to be read to ensure that the contributions within it are preserved.
+    /// Failed to parse index section.
+    ///
+    /// If an input file is a DWARF package, its index section needs to be read to ensure that the
+    /// contributions within it are preserved.
     ParseIndex(gimli::read::Error, String),
     /// Compilation unit in DWARF package is not its index.
     UnitNotInIndex(u64),
