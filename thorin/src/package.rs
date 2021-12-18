@@ -580,7 +580,7 @@ impl<'file> InProgressDwarfPackage<'file> {
 
         for section in input.sections() {
             let data;
-            let (is_debug_types, mut iter) = match section.name() {
+            let mut iter = match section.name() {
                 Ok(".debug_info.dwo" | ".zdebug_info.dwo")
                     // Report an error if a input DWARF package has multiple `.debug_info`
                     // sections.
@@ -591,11 +591,8 @@ impl<'file> InProgressDwarfPackage<'file> {
                 Ok(".debug_info.dwo" | ".zdebug_info.dwo") => {
                     data = section.compressed_data()?.decompress()?;
                     seen_debug_info = true;
-                    (
-                        false,
-                        UnitHeaderIterator::DebugInfo(
-                            gimli::DebugInfo::new(&data, self.endian).units(),
-                        ),
+                    UnitHeaderIterator::DebugInfo(
+                        gimli::DebugInfo::new(&data, self.endian).units(),
                     )
                 }
                 Ok(".debug_types.dwo" | ".zdebug_types.dwo")
@@ -608,11 +605,8 @@ impl<'file> InProgressDwarfPackage<'file> {
                 Ok(".debug_types.dwo" | ".zdebug_types.dwo") => {
                     data = section.compressed_data()?.decompress()?;
                     seen_debug_types = true;
-                    (
-                        true,
-                        UnitHeaderIterator::DebugTypes(
-                            gimli::DebugTypes::new(&data, self.endian).units(),
-                        ),
+                    UnitHeaderIterator::DebugTypes(
+                        gimli::DebugTypes::new(&data, self.endian).units(),
                     )
                 }
                 _ => continue,
@@ -658,11 +652,11 @@ impl<'file> InProgressDwarfPackage<'file> {
                     .map_err(Error::DecompressData)?
                     .ok_or(Error::EmptyUnit(id.index()))?;
 
-                let (debug_info, debug_types) = match id {
-                    DwarfObject::Type(_) if is_debug_types => {
+                let (debug_info, debug_types) = match (&iter, id) {
+                    (UnitHeaderIterator::DebugTypes(_), DwarfObject::Type(_)) => {
                         (None, self.obj.append_to_debug_types(data))
                     }
-                    DwarfObject::Compilation(_) | DwarfObject::Type(_) => {
+                    (_, DwarfObject::Compilation(_) | DwarfObject::Type(_)) => {
                         (self.obj.append_to_debug_info(data), None)
                     }
                 };
