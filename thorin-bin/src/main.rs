@@ -130,7 +130,7 @@ impl io::Write for Output {
 }
 
 fn main() -> Result<()> {
-    let subscriber = Registry::default().with(EnvFilter::from_env("RUST_DWP_LOG")).with(
+    let subscriber = Registry::default().with(EnvFilter::from_env("THORIN_LOG")).with(
         HierarchicalLayer::default()
             .with_writer(io::stderr)
             .with_indent_lines(true)
