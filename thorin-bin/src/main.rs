@@ -20,7 +20,7 @@ use typed_arena::Arena;
 enum Error {
     #[error("Failed to add `{0}` to DWARF package")]
     AddInputObject(String),
-    #[error("Failed to add referenced DWARF object/packages from `{0}` to DWARF package")]
+    #[error("Failed to add DWARF object/packages referenced by `{0}` to DWARF package")]
     AddExecutable(String),
     #[error("Failed to create output object file at `{0}`")]
     CreateOutputFile(String),
