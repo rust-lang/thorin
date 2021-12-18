@@ -298,17 +298,11 @@ macro_rules! generate_append_for {
                     return None;
                 }
 
-                let id = if self.$name.is_none() {
-                    let id = self.obj.add_section(
-                        Vec::new(),
-                        Vec::from($section_name),
-                        SectionKind::Debug,
-                    );
-                    self.$name = Some(id);
-                    id
-                } else {
-                    self.$name.expect("`generate_append_for` is broken")
-                };
+                let id = *self.$name.get_or_insert_with(|| self.obj.add_section(
+                    Vec::new(),
+                    Vec::from($section_name),
+                    SectionKind::Debug,
+                ));
 
                 // FIXME: correct alignment
                 let offset = self.obj.append_section_data(id, data, 1);
