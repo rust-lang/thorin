@@ -3,56 +3,19 @@
 DWARF objects (`*.dwo` files; or `*.o` files with `.dwo` sections), supporting both the pre-standard
 GNU extension format for DWARF packages and the standardized format introduced in DWARF 5.
 
-See the README documents of the [`thorin` crate](thorin/README.md) and the
-[`thorin-bin` crate](thorin-bin/README.md) for usage details of the library and binary interfaces
-respectively.
+## Usage
+To use `thorin` in your own project, add it to your `Cargo.toml`:
 
-## Contributing to `thorin`
-If you want help or mentorship, reach out to us in a GitHub issue, or ask `davidtwco` on the
-[Rust Zulip instance](https://rust-lang.zulipchat.com/).
-
-`thorin` should always build on stable `rustc`. To build `thorin`:
-
-```shell-session
-$ cargo build
+```toml
+thorin-dwp = "0.1.1"
 ```
 
-To run the tests, first install the relevant dependencies:
+See the [`thorin-bin`](../thorin-bin/README.md) crate for an example of using `thorin`'s library
+interface.
 
-```shell-session
-$ apt install --no-install-recommends --yes llvm-13 llvm-13-tools
-$ pip install lit
-```
-
-Next, run the `lit` testsuite (replacing `/path/to/llvm/bin` with the correct path to your LLVM
-installation, if required):
-
-```shell-session
-$ cargo build # in debug mode..
-$ lit -v --path "$PWD/target/debug/:/path/to/llvm/bin/" ./tests
-$ cargo build --release # ..or in release mode
-$ lit -v --path "$PWD/target/release/:/path/to/llvm/bin/" ./tests
-```
-
-We use `rustfmt` to automatically format and style all of our code. To install and use `rustfmt`:
-
-```shell-session
-$ rustup component add rustfmt
-$ cargo fmt
-```
-
-### Filing an issue
-Think you've found a bug? File an issue! To help us understand and reproduce the
-issue, provide us with:
-
-* The (preferably minimal) test case
-* Steps to reproduce the issue using the test case
-* The expected result of following those steps
-* The actual result of following those steps
-
-Definitely file an issue if you see an unexpected panic originating from within `thorin`!
-`thorin` should never panic unless it is explicitly documented to panic in the specific
-circumstances provided.
+## Stability
+`thorin`'s library interface is intended for use by `rustc` for its *Split DWARF* support, it
+currently comes with no stability guarantees and may change at any time.
 
 <br>
 

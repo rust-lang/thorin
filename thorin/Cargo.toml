@@ -6,9 +6,9 @@ description = "Library for building DWARF packages from input DWARF objects and 
 homepage = "https://docs.rs/thorin-dwp"
 keywords = ["dwarf", "split-dwarf", "dwarf-package", "dwarf-object", "dwp"]
 license = "MIT OR Apache-2.0"
-readme = "../README.md"
+readme = "README.md"
 repository = "https://github.com/davidtwco/thorin"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [dependencies]
