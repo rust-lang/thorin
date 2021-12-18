@@ -461,36 +461,36 @@ impl<'file> InProgressDwarfPackage<'file> {
         // Iterate over sections rather than using `section_by_name` because sections can be
         // repeated.
         for section in input.sections() {
-            match section.name().map_err(Error::NonUtf8SectionName)? {
-                ".debug_abbrev.dwo" | ".zdebug_abbrev.dwo" => {
+            match section.name() {
+                Ok(".debug_abbrev.dwo" | ".zdebug_abbrev.dwo") => {
                     let data = section.compressed_data()?.decompress()?;
                     update!(debug_abbrev += self.obj.append_to_debug_abbrev(&data));
                 }
-                ".debug_line.dwo" | ".zdebug_line.dwo" => {
+                Ok(".debug_line.dwo" | ".zdebug_line.dwo") => {
                     let data = section.compressed_data()?.decompress()?;
                     update!(debug_line += self.obj.append_to_debug_line(&data));
                 }
-                ".debug_loc.dwo" | ".zdebug_loc.dwo" => {
+                Ok(".debug_loc.dwo" | ".zdebug_loc.dwo") => {
                     let data = section.compressed_data()?.decompress()?;
                     update!(debug_loc += self.obj.append_to_debug_loc(&data));
                 }
-                ".debug_loclists.dwo" | ".zdebug_loclists.dwo" => {
+                Ok(".debug_loclists.dwo" | ".zdebug_loclists.dwo") => {
                     let data = section.compressed_data()?.decompress()?;
                     update!(debug_loclists += self.obj.append_to_debug_loclists(&data));
                 }
-                ".debug_macinfo.dwo" | ".zdebug_macinfo.dwo" => {
+                Ok(".debug_macinfo.dwo" | ".zdebug_macinfo.dwo") => {
                     let data = section.compressed_data()?.decompress()?;
                     update!(debug_macinfo += self.obj.append_to_debug_macinfo(&data));
                 }
-                ".debug_macro.dwo" | ".zdebug_macro.dwo" => {
+                Ok(".debug_macro.dwo" | ".zdebug_macro.dwo") => {
                     let data = section.compressed_data()?.decompress()?;
                     update!(debug_macro += self.obj.append_to_debug_macro(&data));
                 }
-                ".debug_rnglists.dwo" | ".zdebug_rnglists.dwo" => {
+                Ok(".debug_rnglists.dwo" | ".zdebug_rnglists.dwo") => {
                     let data = section.compressed_data()?.decompress()?;
                     update!(debug_rnglists += self.obj.append_to_debug_rnglists(&data));
                 }
-                ".debug_str_offsets.dwo" | ".zdebug_str_offsets.dwo" => {
+                Ok(".debug_str_offsets.dwo" | ".zdebug_str_offsets.dwo") => {
                     let debug_str_offsets_section = {
                         let data = section.compressed_data()?.decompress()?;
                         let data_ref = sess.alloc_owned_cow(data);
@@ -580,15 +580,15 @@ impl<'file> InProgressDwarfPackage<'file> {
 
         for section in input.sections() {
             let data = section.compressed_data()?.decompress()?;
-            let (is_debug_types, mut iter) = match section.name().map_err(Error::NonUtf8SectionName)? {
-                ".debug_info.dwo" | ".zdebug_info.dwo"
+            let (is_debug_types, mut iter) = match section.name() {
+                Ok(".debug_info.dwo" | ".zdebug_info.dwo")
                     // Report an error if a input DWARF package has multiple `.debug_info`
                     // sections.
                     if seen_debug_info && cu_index.is_some() =>
                 {
                     return Err(Error::MultipleDebugInfoSection);
                 }
-                ".debug_info.dwo" | ".zdebug_info.dwo" => {
+                Ok(".debug_info.dwo" | ".zdebug_info.dwo") => {
                     seen_debug_info = true;
                     (
                         false,
@@ -597,14 +597,14 @@ impl<'file> InProgressDwarfPackage<'file> {
                         ),
                     )
                 }
-                ".debug_types.dwo" | ".zdebug_types.dwo"
+                Ok(".debug_types.dwo" | ".zdebug_types.dwo")
                     // Report an error if a input DWARF package has multiple `.debug_types`
                     // sections.
                     if seen_debug_types && tu_index.is_some() =>
                 {
                     return Err(Error::MultipleDebugTypesSection);
                 }
-                ".debug_types.dwo" | ".zdebug_types.dwo" => {
+                Ok(".debug_types.dwo" | ".zdebug_types.dwo") => {
                     seen_debug_types = true;
                     (
                         true,
