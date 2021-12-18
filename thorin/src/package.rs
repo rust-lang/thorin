@@ -215,48 +215,44 @@ pub(crate) fn create_contribution_adjustor<'input, R: 'input>(
     cu_index: Option<&'input UnitIndex<R>>,
     tu_index: Option<&'input UnitIndex<R>>,
     target_section_id: gimli::SectionId,
-) -> Box<dyn FnMut(DwarfObject, Option<Contribution>) -> Result<Option<Contribution>> + 'input>
+) -> impl FnMut(DwarfObject, Option<Contribution>) -> Result<Option<Contribution>> + 'input
 where
     R: gimli::Reader,
 {
     let mut cu_adjustment = 0;
     let mut tu_adjustment = 0;
 
-    Box::new(
-        move |identifier: DwarfObject,
-              contribution: Option<Contribution>|
-              -> Result<Option<Contribution>> {
-            let (adjustment, index) = match identifier {
-                DwarfObject::Compilation(_) => (&mut cu_adjustment, &cu_index),
-                DwarfObject::Type(_) => (&mut tu_adjustment, &tu_index),
-            };
-            match (index, contribution) {
-                // dwp input with section
-                (Some(index), Some(contribution)) => {
-                    let idx = identifier.index();
-                    let row_id = index.find(idx).ok_or(Error::UnitNotInIndex(idx))?;
-                    let section = index
-                        .sections(row_id)
-                        .map_err(|e| Error::RowNotInIndex(e, row_id))?
-                        .find(|index_section| index_section.section == target_section_id)
-                        .ok_or(Error::SectionNotInRow)?;
-                    let adjusted_offset: u64 = contribution.offset.0 + *adjustment;
-                    *adjustment += section.size as u64;
+    move |identifier: DwarfObject,
+          contribution: Option<Contribution>|
+          -> Result<Option<Contribution>> {
+        let (adjustment, index) = match identifier {
+            DwarfObject::Compilation(_) => (&mut cu_adjustment, &cu_index),
+            DwarfObject::Type(_) => (&mut tu_adjustment, &tu_index),
+        };
+        match (index, contribution) {
+            // dwp input with section
+            (Some(index), Some(contribution)) => {
+                let idx = identifier.index();
+                let row_id = index.find(idx).ok_or(Error::UnitNotInIndex(idx))?;
+                let section = index
+                    .sections(row_id)
+                    .map_err(|e| Error::RowNotInIndex(e, row_id))?
+                    .find(|index_section| index_section.section == target_section_id)
+                    .ok_or(Error::SectionNotInRow)?;
+                let adjusted_offset: u64 = contribution.offset.0 + *adjustment;
+                *adjustment += section.size as u64;
 
-                    Ok(Some(Contribution {
-                        offset: ContributionOffset(adjusted_offset),
-                        size: section.size as u64,
-                    }))
-                }
-                // dwp input without section
-                (Some(_), None) => Ok(None),
-                // dwo input with section
-                (None, Some(contribution)) => Ok(Some(contribution)),
-                // dwo input without section
-                (None, None) => Ok(None),
+                Ok(Some(Contribution {
+                    offset: ContributionOffset(adjusted_offset),
+                    size: section.size as u64,
+                }))
             }
-        },
-    )
+            // dwp input without section
+            (Some(_) | None, None) => Ok(contribution),
+            // dwo input with section, but we aren't adjusting this particular index
+            (None, Some(_)) => Ok(contribution),
+        }
+    }
 }
 
 /// Wrapper around `object::write::Object` that keeps track of the section indexes relevant to
