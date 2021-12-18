@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "thorin-dwp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gimli",
  "indexmap",
@@ -465,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "thorin-dwp-bin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "memmap2",
