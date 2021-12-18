@@ -579,7 +579,7 @@ impl<'file> InProgressDwarfPackage<'file> {
         let mut seen_debug_types = false;
 
         for section in input.sections() {
-            let data = section.compressed_data()?.decompress()?;
+            let data;
             let (is_debug_types, mut iter) = match section.name() {
                 Ok(".debug_info.dwo" | ".zdebug_info.dwo")
                     // Report an error if a input DWARF package has multiple `.debug_info`
@@ -589,6 +589,7 @@ impl<'file> InProgressDwarfPackage<'file> {
                     return Err(Error::MultipleDebugInfoSection);
                 }
                 Ok(".debug_info.dwo" | ".zdebug_info.dwo") => {
+                    data = section.compressed_data()?.decompress()?;
                     seen_debug_info = true;
                     (
                         false,
@@ -605,6 +606,7 @@ impl<'file> InProgressDwarfPackage<'file> {
                     return Err(Error::MultipleDebugTypesSection);
                 }
                 Ok(".debug_types.dwo" | ".zdebug_types.dwo") => {
+                    data = section.compressed_data()?.decompress()?;
                     seen_debug_types = true;
                     (
                         true,
