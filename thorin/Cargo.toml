@@ -7,7 +7,7 @@ homepage = "https://docs.rs/thorin-dwp"
 keywords = ["dwarf", "split-dwarf", "dwarf-package", "dwarf-object", "dwp"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/davidtwco/thorin"
+repository = "https://github.com/rust-lang/thorin"
 version = "0.1.1"
 edition = "2021"
 

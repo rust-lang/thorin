@@ -3,11 +3,11 @@ name = "thorin-dwp-bin"
 authors = [ "David Wood <david.wood@huawei.com>" ]
 categories = ["development-tools::debugging", "command-line-utilities"]
 description = "Merge DWARF objects and packages into DWARF packages"
-homepage = "https://github.com/davidtwco/thorin"
+homepage = "https://github.com/rust-lang/thorin"
 keywords = ["dwarf", "split-dwarf", "dwarf-package", "dwarf-object", "dwp"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/davidtwco/thorin"
+repository = "https://github.com/rust-lang/thorin"
 version = "0.1.1"
 edition = "2021"
 
