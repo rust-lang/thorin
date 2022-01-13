@@ -69,6 +69,113 @@ pub(crate) struct Contribution {
     pub(crate) size: ContributionSize,
 }
 
+/// Populated columns in the `.debug_cu_index` or `.debug_tu_index` section.
+#[derive(Copy, Clone, Debug, Default)]
+pub(crate) struct IndexColumns {
+    pub(crate) debug_info: bool,
+    pub(crate) debug_types: bool,
+    pub(crate) debug_abbrev: bool,
+    pub(crate) debug_line: bool,
+    pub(crate) debug_loc: bool,
+    pub(crate) debug_loclists: bool,
+    pub(crate) debug_rnglists: bool,
+    pub(crate) debug_str_offsets: bool,
+    pub(crate) debug_macinfo: bool,
+    pub(crate) debug_macro: bool,
+}
+
+impl IndexColumns {
+    /// Return the number of columns required for all index entries.
+    fn number_of_columns(&self) -> u32 {
+        self.debug_info as u32
+            + self.debug_types as u32
+            + self.debug_abbrev as u32
+            + self.debug_line as u32
+            + self.debug_loc as u32
+            + self.debug_loclists as u32
+            + self.debug_rnglists as u32
+            + self.debug_str_offsets as u32
+            + self.debug_macinfo as u32
+            + self.debug_macro as u32
+    }
+
+    /// Update the columns to include the columns required for an index entry.
+    fn add_entry(&mut self, entry: &IndexEntry) {
+        self.debug_info |= entry.debug_info.is_some();
+        self.debug_types |= entry.debug_types.is_some();
+        self.debug_abbrev |= entry.debug_abbrev.is_some();
+        self.debug_line |= entry.debug_line.is_some();
+        self.debug_loc |= entry.debug_loc.is_some();
+        self.debug_loclists |= entry.debug_loclists.is_some();
+        self.debug_rnglists |= entry.debug_rnglists.is_some();
+        self.debug_str_offsets |= entry.debug_str_offsets.is_some();
+        self.debug_macinfo |= entry.debug_macinfo.is_some();
+        self.debug_macro |= entry.debug_macro.is_some();
+    }
+
+    /// Write the header row for the columns.
+    ///
+    /// There is only a single header row in any index section, its contents depend on the output
+    /// format and the columns from contributions so the complete index entries are required to
+    /// know what header to write.
+    fn write_header<Endian: gimli::Endianity>(
+        &self,
+        out: &mut EndianVec<Endian>,
+        encoding: Encoding,
+    ) -> Result<()> {
+        if encoding.is_gnu_extension_dwarf_package_format() {
+            if self.debug_info {
+                out.write_u32(gimli::DW_SECT_V2_INFO.0)?;
+            }
+            if self.debug_types {
+                out.write_u32(gimli::DW_SECT_V2_TYPES.0)?;
+            }
+            if self.debug_abbrev {
+                out.write_u32(gimli::DW_SECT_V2_ABBREV.0)?;
+            }
+            if self.debug_line {
+                out.write_u32(gimli::DW_SECT_V2_LINE.0)?;
+            }
+            if self.debug_loc {
+                out.write_u32(gimli::DW_SECT_V2_LOC.0)?;
+            }
+            if self.debug_str_offsets {
+                out.write_u32(gimli::DW_SECT_V2_STR_OFFSETS.0)?;
+            }
+            if self.debug_macinfo {
+                out.write_u32(gimli::DW_SECT_V2_MACINFO.0)?;
+            }
+            if self.debug_macro {
+                out.write_u32(gimli::DW_SECT_V2_MACRO.0)?;
+            }
+        } else {
+            if self.debug_info {
+                out.write_u32(gimli::DW_SECT_INFO.0)?;
+            }
+            if self.debug_abbrev {
+                out.write_u32(gimli::DW_SECT_ABBREV.0)?;
+            }
+            if self.debug_line {
+                out.write_u32(gimli::DW_SECT_LINE.0)?;
+            }
+            if self.debug_loclists {
+                out.write_u32(gimli::DW_SECT_LOCLISTS.0)?;
+            }
+            if self.debug_rnglists {
+                out.write_u32(gimli::DW_SECT_RNGLISTS.0)?;
+            }
+            if self.debug_str_offsets {
+                out.write_u32(gimli::DW_SECT_STR_OFFSETS.0)?;
+            }
+            if self.debug_macro {
+                out.write_u32(gimli::DW_SECT_MACRO.0)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// Entry into the `.debug_cu_index` or `.debug_tu_index` section.
 ///
 /// Contributions from `.debug_loclists.dwo` and `.debug_rnglists.dwo` from type units aren't
@@ -90,132 +197,48 @@ pub(crate) struct IndexEntry {
 }
 
 impl IndexEntry {
-    /// Return the number of columns required for this index entry.
-    fn number_of_columns(&self) -> u32 {
-        self.debug_info.map_or(0, |_| 1)
-            + self.debug_types.map_or(0, |_| 1)
-            + self.debug_abbrev.map_or(0, |_| 1)
-            + self.debug_line.map_or(0, |_| 1)
-            + self.debug_loc.map_or(0, |_| 1)
-            + self.debug_loclists.map_or(0, |_| 1)
-            + self.debug_rnglists.map_or(0, |_| 1)
-            + self.debug_str_offsets.map_or(0, |_| 1)
-            + self.debug_macinfo.map_or(0, |_| 1)
-            + self.debug_macro.map_or(0, |_| 1)
-    }
-
-    /// Returns `true` if the header of this entry is the same as the header of `other`.
-    fn eq_header(&self, other: &Self) -> bool {
-        (self.debug_info.is_some() == other.debug_info.is_some())
-            && (self.debug_types.is_some() == other.debug_types.is_some())
-            && (self.debug_abbrev.is_some() == other.debug_abbrev.is_some())
-            && (self.debug_line.is_some() == other.debug_line.is_some())
-            && (self.debug_loc.is_some() == other.debug_loc.is_some())
-            && (self.debug_loclists.is_some() == other.debug_loclists.is_some())
-            && (self.debug_rnglists.is_some() == other.debug_rnglists.is_some())
-            && (self.debug_str_offsets.is_some() == other.debug_str_offsets.is_some())
-            && (self.debug_macinfo.is_some() == other.debug_macinfo.is_some())
-            && (self.debug_macro.is_some() == other.debug_macro.is_some())
-    }
-
-    /// Write the header row for this entry.
-    ///
-    /// There is only a single header row in any index section, its contents depend on the output
-    /// format and the columns from contributions so a complete index entry is required to know
-    /// what header to write.
-    fn write_header<Endian: gimli::Endianity>(&self, out: &mut EndianVec<Endian>) -> Result<()> {
-        if self.encoding.is_gnu_extension_dwarf_package_format() {
-            if self.debug_info.is_some() {
-                out.write_u32(gimli::DW_SECT_V2_INFO.0)?;
-            }
-            if self.debug_types.is_some() {
-                out.write_u32(gimli::DW_SECT_V2_TYPES.0)?;
-            }
-            if self.debug_abbrev.is_some() {
-                out.write_u32(gimli::DW_SECT_V2_ABBREV.0)?;
-            }
-            if self.debug_line.is_some() {
-                out.write_u32(gimli::DW_SECT_V2_LINE.0)?;
-            }
-            if self.debug_loc.is_some() {
-                out.write_u32(gimli::DW_SECT_V2_LOC.0)?;
-            }
-            if self.debug_str_offsets.is_some() {
-                out.write_u32(gimli::DW_SECT_V2_STR_OFFSETS.0)?;
-            }
-            if self.debug_macinfo.is_some() {
-                out.write_u32(gimli::DW_SECT_V2_MACINFO.0)?;
-            }
-            if self.debug_macro.is_some() {
-                out.write_u32(gimli::DW_SECT_V2_MACRO.0)?;
-            }
-        } else {
-            if self.debug_info.is_some() {
-                out.write_u32(gimli::DW_SECT_INFO.0)?;
-            }
-            if self.debug_abbrev.is_some() {
-                out.write_u32(gimli::DW_SECT_ABBREV.0)?;
-            }
-            if self.debug_line.is_some() {
-                out.write_u32(gimli::DW_SECT_LINE.0)?;
-            }
-            if self.debug_loclists.is_some() {
-                out.write_u32(gimli::DW_SECT_LOCLISTS.0)?;
-            }
-            if self.debug_rnglists.is_some() {
-                out.write_u32(gimli::DW_SECT_RNGLISTS.0)?;
-            }
-            if self.debug_str_offsets.is_some() {
-                out.write_u32(gimli::DW_SECT_STR_OFFSETS.0)?;
-            }
-            if self.debug_macro.is_some() {
-                out.write_u32(gimli::DW_SECT_MACRO.0)?;
-            }
-        }
-
-        Ok(())
-    }
-
     /// Visit each contribution in an entry, calling `proj` to write a specific field.
     #[tracing::instrument(level = "trace", skip(out, proj))]
     fn write_contribution<Endian, Proj>(
         &self,
         out: &mut EndianVec<Endian>,
         proj: Proj,
+        columns: &IndexColumns,
     ) -> Result<()>
     where
         Endian: gimli::Endianity,
-        Proj: Fn(Contribution) -> u32,
+        Proj: Copy + Fn(Contribution) -> u32,
     {
-        if let Some(debug_info) = self.debug_info {
-            out.write_u32(proj(debug_info))?;
+        let proj = |contrib: Option<Contribution>| contrib.map(proj).unwrap_or(0);
+        if columns.debug_info {
+            out.write_u32(proj(self.debug_info))?;
         }
-        if let Some(debug_types) = self.debug_types {
-            out.write_u32(proj(debug_types))?;
+        if columns.debug_types {
+            out.write_u32(proj(self.debug_types))?;
         }
-        if let Some(debug_abbrev) = self.debug_abbrev {
-            out.write_u32(proj(debug_abbrev))?;
+        if columns.debug_abbrev {
+            out.write_u32(proj(self.debug_abbrev))?;
         }
-        if let Some(debug_line) = self.debug_line {
-            out.write_u32(proj(debug_line))?;
+        if columns.debug_line {
+            out.write_u32(proj(self.debug_line))?;
         }
-        if let Some(debug_loc) = self.debug_loc {
-            out.write_u32(proj(debug_loc))?;
+        if columns.debug_loc {
+            out.write_u32(proj(self.debug_loc))?;
         }
-        if let Some(debug_loclists) = self.debug_loclists {
-            out.write_u32(proj(debug_loclists))?;
+        if columns.debug_loclists {
+            out.write_u32(proj(self.debug_loclists))?;
         }
-        if let Some(debug_rnglists) = self.debug_rnglists {
-            out.write_u32(proj(debug_rnglists))?;
+        if columns.debug_rnglists {
+            out.write_u32(proj(self.debug_rnglists))?;
         }
-        if let Some(debug_str_offsets) = self.debug_str_offsets {
-            out.write_u32(proj(debug_str_offsets))?;
+        if columns.debug_str_offsets {
+            out.write_u32(proj(self.debug_str_offsets))?;
         }
-        if let Some(debug_macinfo) = self.debug_macinfo {
-            out.write_u32(proj(debug_macinfo))?;
+        if columns.debug_macinfo {
+            out.write_u32(proj(self.debug_macinfo))?;
         }
-        if let Some(debug_macro) = self.debug_macro {
-            out.write_u32(proj(debug_macro))?;
+        if columns.debug_macro {
+            out.write_u32(proj(self.debug_macro))?;
         }
 
         Ok(())
@@ -249,17 +272,12 @@ pub(crate) fn write_index<'output, Endian: gimli::Endianity>(
     }
     debug!(?encoding);
 
-    let num_columns = entries[0].number_of_columns();
-    debug!(?entries, ?num_columns);
-
-    assert!(entries.windows(2).all(|window| {
-        trace!(?window);
-        match window {
-            [_] => true,
-            [first, second] => first.eq_header(second),
-            _ => panic!("invalid window"),
-        }
-    }));
+    let mut columns = IndexColumns::default();
+    for entry in entries {
+        columns.add_entry(entry);
+    }
+    let num_columns = columns.number_of_columns();
+    debug!(?entries, ?columns, ?num_columns);
 
     // Write header..
     if encoding.is_gnu_extension_dwarf_package_format() {
@@ -294,21 +312,21 @@ pub(crate) fn write_index<'output, Endian: gimli::Endianity>(
     }
 
     // Write column headers..
-    entries[0].write_header(&mut out)?;
+    columns.write_header(&mut out, encoding)?;
 
     // Write offsets..
     let write_offset = |contrib: Contribution| {
         contrib.offset.0.try_into().expect("contribution offset larger than u32")
     };
     for entry in entries {
-        entry.write_contribution(&mut out, write_offset)?;
+        entry.write_contribution(&mut out, write_offset, &columns)?;
     }
 
     // Write sizes..
     let write_size =
         |contrib: Contribution| contrib.size.try_into().expect("contribution size larger than u32");
     for entry in entries {
-        entry.write_contribution(&mut out, write_size)?;
+        entry.write_contribution(&mut out, write_size, &columns)?;
     }
 
     Ok(out)

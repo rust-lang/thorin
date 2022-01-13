@@ -1,0 +1,7 @@
+RUN: thorin %p/inputs/columns-a.dwo %p/inputs/columns-b.dwo -o - \
+RUN:   | llvm-dwarfdump -v - | FileCheck --check-prefixes=CHECK %s
+
+CHECK-LABEL: .debug_cu_index contents:
+CHECK: Index Signature          INFO                     ABBREV                   LINE                     STR_OFFSETS
+CHECK: 2 0x{{.*}} [0x0000002d, 0x00000052) [0x0000002c, 0x00000056) [0x00000000, 0x00000000) [0x00000008, 0x00000018)
+CHECK: 3 0x{{.*}} [0x00000000, 0x0000002d) [0x00000000, 0x0000002c) [0x00000000, 0x00000025) [0x00000000, 0x00000008)
