@@ -48,7 +48,7 @@ impl<E: gimli::Endianity> PackageStringTable<E> {
         bytes: T,
     ) -> Result<PackageStringOffset> {
         let bytes = bytes.into();
-        assert!(!bytes.contains(&0));
+        debug_assert!(!bytes.contains(&0));
         let (index, is_new) = self.strings.insert_full(bytes.clone());
         let index = PackageStringId(index);
         if !is_new {
