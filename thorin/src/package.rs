@@ -374,7 +374,7 @@ pub(crate) struct InProgressDwarfPackage<'file> {
     /// In-progress string table being accumulated.
     ///
     /// Used to write final `.debug_str.dwo` and `.debug_str_offsets.dwo`.
-    string_table: PackageStringTable<RunTimeEndian>,
+    string_table: PackageStringTable,
 
     /// Compilation unit index entries (offsets + sizes) being accumulated.
     cu_index_entries: Vec<IndexEntry>,
@@ -402,7 +402,7 @@ impl<'file> InProgressDwarfPackage<'file> {
         Self {
             endian,
             obj: DwarfPackageObject::new(architecture, endianness),
-            string_table: PackageStringTable::new(endian),
+            string_table: PackageStringTable::new(),
             cu_index_entries: Default::default(),
             tu_index_entries: Default::default(),
             contained_units: Default::default(),
@@ -707,7 +707,7 @@ impl<'file> InProgressDwarfPackage<'file> {
         let Self { mut obj, string_table, cu_index_entries, tu_index_entries, .. } = self;
 
         // Write `.debug_str` to the object.
-        let _ = obj.append_to_debug_str(string_table.finish().slice());
+        let _ = obj.append_to_debug_str(&string_table.finish());
 
         // Write `.debug_{cu,tu}_index` sections to the object.
         debug!("writing cu index");
