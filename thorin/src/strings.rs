@@ -4,17 +4,12 @@ use gimli::{
     write::{EndianVec, Writer},
     DebugStrOffsetsBase, DebugStrOffsetsIndex, DwarfFileType, Encoding, EndianSlice, Format,
 };
-use indexmap::IndexSet;
 use tracing::debug;
 
 use crate::{
     error::{Error, Result},
     ext::PackageFormatExt,
 };
-
-/// New-type'd index from `IndexVec` of strings inserted into the `.debug_str` section.
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct PackageStringId(usize);
 
 /// New-type'd offset into `.debug_str` section.
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
@@ -31,34 +26,27 @@ pub(crate) struct PackageStringOffset(usize);
 /// into the same `.debug_str`.
 pub(crate) struct PackageStringTable<E: gimli::Endianity> {
     data: EndianVec<E>,
-    strings: IndexSet<Vec<u8>>,
-    offsets: HashMap<PackageStringId, PackageStringOffset>,
+    strings: HashMap<Vec<u8>, PackageStringOffset>,
 }
 
 impl<E: gimli::Endianity> PackageStringTable<E> {
     /// Create a new `PackageStringTable` with a given endianity.
     pub(crate) fn new(endianness: E) -> Self {
-        Self { data: EndianVec::new(endianness), strings: IndexSet::new(), offsets: HashMap::new() }
+        Self { data: EndianVec::new(endianness), strings: HashMap::new() }
     }
 
     /// Insert a string into the string table and return its offset in the table. If the string is
     /// already in the table, returns its offset.
-    pub(crate) fn get_or_insert<T: Into<Vec<u8>>>(
-        &mut self,
-        bytes: T,
-    ) -> Result<PackageStringOffset> {
-        let bytes = bytes.into();
+    pub(crate) fn get_or_insert(&mut self, bytes: &[u8]) -> Result<PackageStringOffset> {
         debug_assert!(!bytes.contains(&0));
-        let (index, is_new) = self.strings.insert_full(bytes.clone());
-        let index = PackageStringId(index);
-        if !is_new {
-            return Ok(*self.offsets.get(&index).expect("insert exists but no offset"));
+        if let Some(offset) = self.strings.get(bytes) {
+            return Ok(*offset);
         }
 
         // Keep track of the offset for this string, it might be referenced by the next compilation
         // unit too.
         let offset = PackageStringOffset(self.data.len());
-        self.offsets.insert(index, offset);
+        self.strings.insert(bytes.into(), offset);
 
         // Insert into the string table.
         self.data.write(&bytes)?;
@@ -125,9 +113,8 @@ impl<E: gimli::Endianity> PackageStringTable<E> {
                 .map_err(|e| Error::OffsetAtIndex(e, i))?;
             let dwo_str =
                 debug_str.get_str(dwo_offset).map_err(|e| Error::StrAtOffset(e, dwo_offset.0))?;
-            let dwo_str = dwo_str.to_string()?;
 
-            let dwp_offset = self.get_or_insert(dwo_str)?;
+            let dwp_offset = self.get_or_insert(&dwo_str)?;
 
             match encoding.format {
                 Format::Dwarf32 => {
