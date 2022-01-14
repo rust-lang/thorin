@@ -13,6 +13,7 @@ edition = "2021"
 
 [dependencies]
 tracing = "0.1.29"
+hashbrown = "0.11.2"
 
 [dependencies.gimli]
 version  = "0.26.1"

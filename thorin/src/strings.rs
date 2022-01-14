@@ -1,10 +1,9 @@
-use std::collections::HashMap;
-
 use gimli::{
     write::{EndianVec, Writer},
     DebugStrOffsetsBase, DebugStrOffsetsIndex, DwarfFileType, Encoding, EndianSlice, Format,
     Section,
 };
+use hashbrown::HashMap;
 use tracing::debug;
 
 use crate::{

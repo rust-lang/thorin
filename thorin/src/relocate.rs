@@ -2,9 +2,10 @@
 //! to be fully relocated prior to parsing. Necessary to load object files that reference dwarf
 //! objects (not just executables). Implementation derived from Gimli's `dwarfdump` example.
 
-use std::{borrow::Cow, collections::HashMap};
+use std::borrow::Cow;
 
 use gimli;
+use hashbrown::HashMap;
 use object::{Object, ObjectSection, ObjectSymbol, RelocationKind, RelocationTarget};
 
 use crate::{Error, Result};
