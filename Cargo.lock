@@ -484,6 +484,7 @@ name = "thorin-dwp"
 version = "0.1.1"
 dependencies = [
  "gimli",
+ "hashbrown",
  "object",
  "tracing",
 ]
