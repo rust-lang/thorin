@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use gimli::{
     write::{EndianVec, Writer},
     DebugStrOffsetsBase, DebugStrOffsetsIndex, DwarfFileType, Encoding, EndianSlice, Format,
+    Section,
 };
 use tracing::debug;
 
@@ -24,23 +25,23 @@ pub(crate) struct PackageStringOffset(usize);
 /// section, but `PackageStringTable` accumulates a single `.debug_str` section and can be used to
 /// produce multiple `.debug_str_offsets` sections (which will be concatenated) which all offset
 /// into the same `.debug_str`.
-pub(crate) struct PackageStringTable<E: gimli::Endianity> {
-    data: EndianVec<E>,
+pub(crate) struct PackageStringTable {
+    data: Vec<u8>,
     strings: HashMap<Vec<u8>, PackageStringOffset>,
 }
 
-impl<E: gimli::Endianity> PackageStringTable<E> {
+impl PackageStringTable {
     /// Create a new `PackageStringTable` with a given endianity.
-    pub(crate) fn new(endianness: E) -> Self {
-        Self { data: EndianVec::new(endianness), strings: HashMap::new() }
+    pub(crate) fn new() -> Self {
+        Self { data: Vec::new(), strings: HashMap::new() }
     }
 
     /// Insert a string into the string table and return its offset in the table. If the string is
     /// already in the table, returns its offset.
-    pub(crate) fn get_or_insert(&mut self, bytes: &[u8]) -> Result<PackageStringOffset> {
+    pub(crate) fn get_or_insert(&mut self, bytes: &[u8]) -> PackageStringOffset {
         debug_assert!(!bytes.contains(&0));
         if let Some(offset) = self.strings.get(bytes) {
-            return Ok(*offset);
+            return *offset;
         }
 
         // Keep track of the offset for this string, it might be referenced by the next compilation
@@ -49,16 +50,16 @@ impl<E: gimli::Endianity> PackageStringTable<E> {
         self.strings.insert(bytes.into(), offset);
 
         // Insert into the string table.
-        self.data.write(&bytes)?;
-        self.data.write_u8(0)?;
+        self.data.extend_from_slice(bytes);
+        self.data.push(0);
 
-        Ok(offset)
+        offset
     }
 
     /// Adds strings from input `.debug_str_offsets` and `.debug_str` into the string table, returns
     /// data for a equivalent `.debug_str_offsets` section with offsets pointing into the new
     /// `.debug_str` section.
-    pub(crate) fn remap_str_offsets_section(
+    pub(crate) fn remap_str_offsets_section<E: gimli::Endianity>(
         &mut self,
         debug_str: gimli::DebugStr<EndianSlice<E>>,
         debug_str_offsets: gimli::DebugStrOffsets<EndianSlice<E>>,
@@ -70,6 +71,9 @@ impl<E: gimli::Endianity> PackageStringTable<E> {
             Format::Dwarf32 => 4,
             Format::Dwarf64 => 8,
         };
+
+        // Reduce the number of allocations needed.
+        self.data.reserve(debug_str.reader().len());
 
         let mut data = EndianVec::new(endian);
 
@@ -114,7 +118,7 @@ impl<E: gimli::Endianity> PackageStringTable<E> {
             let dwo_str =
                 debug_str.get_str(dwo_offset).map_err(|e| Error::StrAtOffset(e, dwo_offset.0))?;
 
-            let dwp_offset = self.get_or_insert(&dwo_str)?;
+            let dwp_offset = self.get_or_insert(&dwo_str);
 
             match encoding.format {
                 Format::Dwarf32 => {
@@ -134,7 +138,7 @@ impl<E: gimli::Endianity> PackageStringTable<E> {
     }
 
     /// Returns the accumulated `.debug_str` section data
-    pub(crate) fn finish(self) -> EndianVec<E> {
+    pub(crate) fn finish(self) -> Vec<u8> {
         self.data
     }
 }
