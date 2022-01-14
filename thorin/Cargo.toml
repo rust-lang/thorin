@@ -23,7 +23,7 @@ default-features = false
 features = [ "read", "write", "std" ]
 
 [dependencies.object]
-version  = "0.27.1"
+version  = "0.28.1"
 default-features = false
 features = [ "archive", "read", "write", "compression" ]
 
