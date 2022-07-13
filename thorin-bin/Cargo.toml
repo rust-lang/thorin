@@ -24,7 +24,7 @@ tracing-tree = "0.1.10"
 typed-arena = "2.0.1"
 
 [dependencies.object]
-version  = "0.28.1"
+version = "0.29.0"
 default-features = false
 features = [ "archive", "read", "write", "compression" ]
 
