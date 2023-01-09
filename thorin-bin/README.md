@@ -16,7 +16,7 @@ objects (including DWARF objects in archive files, such as Rust rlibs)! Install 
 ```shell-session
 $ cargo install thorin-dwp-bin
 $ thorin --help
-thorin 0.3.0
+thorin 0.4.0
 merge dwarf objects into dwarf packages
 
 USAGE:
