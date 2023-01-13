@@ -38,10 +38,10 @@ struct Opt {
     inputs: Vec<PathBuf>,
     /// Specify path to executables to read list of dwarf objects from
     #[structopt(short = "e", long = "exec", parse(from_os_str))]
-    executables: Option<Vec<PathBuf>>,
-    /// Specify path to write the dwarf package to
-    #[structopt(short = "o", long = "output", parse(from_os_str), default_value = "-")]
-    output: PathBuf,
+    executables: Vec<PathBuf>,
+    /// Specify path to write the dwarf package to [default: -]
+    #[structopt(short = "o", long = "output", parse(from_os_str))]
+    output: Option<PathBuf>,
 }
 
 /// Implementation of `thorin::Session` using `typed_arena` and `memmap2`.
@@ -146,29 +146,36 @@ fn main() -> Result<()> {
     let mut package = thorin::DwarfPackage::new(&sess);
 
     // Return early if there isn't any input.
-    if opt.inputs.is_empty() && opt.executables.is_none() {
+    if opt.inputs.is_empty() && opt.executables.is_empty() {
         return Ok(());
     }
 
-    for input in opt.inputs {
+    for input in &opt.inputs {
         package
-            .add_input_object(&input)
+            .add_input_object(input)
             .with_context(|| Error::AddInputObject(input.display().to_string()))?;
     }
 
-    if let Some(executables) = opt.executables {
-        for executable in executables {
-            // Failing to read the referenced object might be expected if the path referenced by
-            // the executable isn't found but the referenced DWARF object is later found as an
-            // input - calling `finish` will return an error in this case.
-            package
-                .add_executable(&executable, thorin::MissingReferencedObjectBehaviour::Skip)
-                .with_context(|| Error::AddExecutable(executable.display().to_string()))?;
-        }
+    for executable in &opt.executables {
+        // Failing to read the referenced object might be expected if the path referenced by
+        // the executable isn't found but the referenced DWARF object is later found as an
+        // input - calling `finish` will return an error in this case.
+        package
+            .add_executable(executable, thorin::MissingReferencedObjectBehaviour::Skip)
+            .with_context(|| Error::AddExecutable(executable.display().to_string()))?;
     }
 
-    let output_stream = Output::new(opt.output.as_ref())
-        .with_context(|| Error::CreateOutputFile(opt.output.display().to_string()))?;
+    let output = opt.output.unwrap_or_else(|| {
+        if opt.executables.len() == 1 {
+            let mut path = opt.executables.first().unwrap().clone().into_os_string();
+            path.push(".dwp");
+            PathBuf::from(path)
+        } else {
+            PathBuf::from("-")
+        }
+    });
+    let output_stream = Output::new(output.as_os_str())
+        .with_context(|| Error::CreateOutputFile(output.display().to_string()))?;
     let mut output_stream = StreamingBuffer::new(BufWriter::new(output_stream));
     package
         .finish()
