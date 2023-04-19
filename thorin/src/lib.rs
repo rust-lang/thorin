@@ -1,3 +1,5 @@
+pub extern crate object;
+
 use std::{
     borrow::Cow,
     collections::HashSet,
