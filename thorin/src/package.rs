@@ -491,10 +491,17 @@ impl<'file> InProgressDwarfPackage<'file> {
                     update!(debug_rnglists += self.obj.append_to_debug_rnglists(&data));
                 }
                 Ok(".debug_str_offsets.dwo" | ".zdebug_str_offsets.dwo") => {
-                    let debug_str_offsets_section = {
+                    let (debug_str_offsets_section, debug_str_offsets_section_len) = {
                         let data = section.compressed_data()?.decompress()?;
+                        let len = data.len() as u64;
                         let data_ref = sess.alloc_owned_cow(data);
-                        gimli::DebugStrOffsets::from(gimli::EndianSlice::new(data_ref, self.endian))
+                        (
+                            gimli::DebugStrOffsets::from(gimli::EndianSlice::new(
+                                data_ref,
+                                self.endian,
+                            )),
+                            len,
+                        )
                     };
 
                     let debug_str_section =
@@ -509,7 +516,7 @@ impl<'file> InProgressDwarfPackage<'file> {
                     let data = self.string_table.remap_str_offsets_section(
                         debug_str_section,
                         debug_str_offsets_section,
-                        section.size(),
+                        debug_str_offsets_section_len,
                         self.endian,
                         encoding,
                     )?;
