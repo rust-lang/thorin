@@ -12,7 +12,7 @@ cross-crate Split DWARF packaging in `rustc`.
 To use `thorin` in your own project, add it to your `Cargo.toml`:
 
 ```toml
-thorin-dwp = "0.6.0"
+thorin-dwp = "0.7.0"
 ```
 
 See the [`thorin-bin`](../thorin-bin/README.md) crate for an example of using `thorin`'s library

@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "thorin-dwp"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "gimli",
  "hashbrown",
@@ -611,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "thorin-dwp-bin"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "memmap2",
