@@ -214,7 +214,7 @@ where
 pub(crate) fn create_contribution_adjustor<'input, R: 'input>(
     cu_index: Option<&'input UnitIndex<R>>,
     tu_index: Option<&'input UnitIndex<R>>,
-    target_section_id: gimli::SectionId,
+    target_section_id: gimli::IndexSectionId,
 ) -> impl FnMut(DwarfObject, Option<Contribution>) -> Result<Option<Contribution>> + 'input
 where
     R: gimli::Reader,
@@ -544,42 +544,42 @@ impl<'file> InProgressDwarfPackage<'file> {
         let mut abbrev_adjustor = create_contribution_adjustor(
             cu_index.as_ref(),
             tu_index.as_ref(),
-            gimli::SectionId::DebugAbbrev,
+            gimli::IndexSectionId::DebugAbbrev,
         );
         let mut line_adjustor = create_contribution_adjustor(
             cu_index.as_ref(),
             tu_index.as_ref(),
-            gimli::SectionId::DebugLine,
+            gimli::IndexSectionId::DebugLine,
         );
         let mut loc_adjustor = create_contribution_adjustor(
             cu_index.as_ref(),
             tu_index.as_ref(),
-            gimli::SectionId::DebugLoc,
+            gimli::IndexSectionId::DebugLoc,
         );
         let mut loclists_adjustor = create_contribution_adjustor(
             cu_index.as_ref(),
             tu_index.as_ref(),
-            gimli::SectionId::DebugLocLists,
+            gimli::IndexSectionId::DebugLocLists,
         );
         let mut rnglists_adjustor = create_contribution_adjustor(
             cu_index.as_ref(),
             tu_index.as_ref(),
-            gimli::SectionId::DebugRngLists,
+            gimli::IndexSectionId::DebugRngLists,
         );
         let mut str_offsets_adjustor = create_contribution_adjustor(
             cu_index.as_ref(),
             tu_index.as_ref(),
-            gimli::SectionId::DebugStrOffsets,
+            gimli::IndexSectionId::DebugStrOffsets,
         );
         let mut macinfo_adjustor = create_contribution_adjustor(
             cu_index.as_ref(),
             tu_index.as_ref(),
-            gimli::SectionId::DebugMacinfo,
+            gimli::IndexSectionId::DebugMacinfo,
         );
         let mut macro_adjustor = create_contribution_adjustor(
             cu_index.as_ref(),
             tu_index.as_ref(),
-            gimli::SectionId::DebugMacro,
+            gimli::IndexSectionId::DebugMacro,
         );
 
         let mut seen_debug_info = false;
