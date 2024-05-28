@@ -541,46 +541,16 @@ impl<'file> InProgressDwarfPackage<'file> {
 
         // Create offset adjustor functions, see comment on `create_contribution_adjustor` for
         // explanation.
-        let mut abbrev_adjustor = create_contribution_adjustor(
-            cu_index.as_ref(),
-            tu_index.as_ref(),
-            gimli::IndexSectionId::DebugAbbrev,
-        );
-        let mut line_adjustor = create_contribution_adjustor(
-            cu_index.as_ref(),
-            tu_index.as_ref(),
-            gimli::IndexSectionId::DebugLine,
-        );
-        let mut loc_adjustor = create_contribution_adjustor(
-            cu_index.as_ref(),
-            tu_index.as_ref(),
-            gimli::IndexSectionId::DebugLoc,
-        );
-        let mut loclists_adjustor = create_contribution_adjustor(
-            cu_index.as_ref(),
-            tu_index.as_ref(),
-            gimli::IndexSectionId::DebugLocLists,
-        );
-        let mut rnglists_adjustor = create_contribution_adjustor(
-            cu_index.as_ref(),
-            tu_index.as_ref(),
-            gimli::IndexSectionId::DebugRngLists,
-        );
-        let mut str_offsets_adjustor = create_contribution_adjustor(
-            cu_index.as_ref(),
-            tu_index.as_ref(),
-            gimli::IndexSectionId::DebugStrOffsets,
-        );
-        let mut macinfo_adjustor = create_contribution_adjustor(
-            cu_index.as_ref(),
-            tu_index.as_ref(),
-            gimli::IndexSectionId::DebugMacinfo,
-        );
-        let mut macro_adjustor = create_contribution_adjustor(
-            cu_index.as_ref(),
-            tu_index.as_ref(),
-            gimli::IndexSectionId::DebugMacro,
-        );
+        let adjustor_for_index =
+            |id| create_contribution_adjustor(cu_index.as_ref(), tu_index.as_ref(), id);
+        let mut abbrev_adjustor = adjustor_for_index(gimli::IndexSectionId::DebugAbbrev);
+        let mut line_adjustor = adjustor_for_index(gimli::IndexSectionId::DebugLine);
+        let mut loc_adjustor = adjustor_for_index(gimli::IndexSectionId::DebugLoc);
+        let mut loclists_adjustor = adjustor_for_index(gimli::IndexSectionId::DebugLocLists);
+        let mut rnglists_adjustor = adjustor_for_index(gimli::IndexSectionId::DebugRngLists);
+        let mut str_offsets_adjustor = adjustor_for_index(gimli::IndexSectionId::DebugStrOffsets);
+        let mut macinfo_adjustor = adjustor_for_index(gimli::IndexSectionId::DebugMacinfo);
+        let mut macro_adjustor = adjustor_for_index(gimli::IndexSectionId::DebugMacro);
 
         let mut seen_debug_info = false;
         let mut seen_debug_types = false;
