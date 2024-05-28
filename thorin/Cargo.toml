@@ -16,14 +16,14 @@ tracing = "0.1.29"
 hashbrown = "0.14.0"
 
 [dependencies.gimli]
-version  = "0.28.0"
+version  = "0.30.0"
 default-features = false
 # `gimli/std` pulls in `fallible-iterator` which we don't use, but can't opt out of, because of
 # cargo#8832.
 features = [ "read", "write", "std" ]
 
 [dependencies.object]
-version = "0.32.0"
+version = "0.36.0"
 default-features = false
 features = [ "archive", "read", "write", "compression" ]
 
