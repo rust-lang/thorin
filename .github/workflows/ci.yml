@@ -20,13 +20,13 @@ jobs:
       - name: Install LLVM
         run: |
           wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-          sudo add-apt-repository "deb http://apt.llvm.org/focal/ llvm-toolchain-focal-13 main"
+          sudo add-apt-repository "deb http://apt.llvm.org/focal/ llvm-toolchain-focal-15 main"
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes llvm-13 llvm-13-tools
+          sudo apt-get install --no-install-recommends --yes llvm-15 llvm-15-tools
       - name: Install lit
         run: pip install lit
       - name: Run lit testsuite
-        run: lit -v --path "$PWD/target/release/:/usr/lib/llvm-13/bin/" ./tests
+        run: lit -v --path "$PWD/target/release/:/usr/lib/llvm-15/bin/" ./tests
 
   fmt:
     name: rustfmt

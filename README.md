@@ -25,7 +25,7 @@ $ cargo build
 To run the tests, first install the relevant dependencies:
 
 ```shell-session
-$ apt install --no-install-recommends --yes llvm-13 llvm-13-tools
+$ apt install --no-install-recommends --yes llvm-15 llvm-15-tools
 $ pip install lit
 ```
 
