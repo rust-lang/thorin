@@ -131,6 +131,11 @@ where
             debug!("no `.debug_info.dwo` in input dwarf object");
             return Ok(());
         };
+        let encoding = gimli::Encoding {
+            address_size: encoding.address_size,
+            format: gimli::Format::Dwarf64,
+            version: encoding.version,
+        };
 
         let sess = self.sess;
         self.maybe_in_progress
