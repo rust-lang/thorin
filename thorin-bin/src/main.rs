@@ -7,9 +7,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use clap::Parser;
 use memmap2::Mmap;
 use object::write::StreamingBuffer;
-use structopt::StructOpt;
 use thiserror::Error;
 use tracing::trace;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
@@ -30,17 +30,17 @@ enum Error {
     EmitOutputObject,
 }
 
-#[derive(Debug, StructOpt)]
-#[structopt(name = "thorin", about = "merge dwarf objects into dwarf packages")]
+#[derive(Debug, Parser)]
+#[command(name = "thorin", about = "merge dwarf objects into dwarf packages", version)]
 struct Opt {
     /// Specify path to input dwarf objects and packages
-    #[structopt(parse(from_os_str))]
+    #[arg(value_hint = clap::ValueHint::DirPath)]
     inputs: Vec<PathBuf>,
     /// Specify path to executables to read list of dwarf objects from
-    #[structopt(short = "e", long = "exec", parse(from_os_str))]
+    #[arg(short = 'e', long = "exec", value_hint = clap::ValueHint::DirPath)]
     executables: Vec<PathBuf>,
     /// Specify path to write the dwarf package to [default: -]
-    #[structopt(short = "o", long = "output", parse(from_os_str))]
+    #[arg(short = 'o', long = "output", value_hint = clap::ValueHint::DirPath)]
     output: Option<PathBuf>,
 }
 
@@ -139,7 +139,7 @@ fn main() -> Result<()> {
     );
     tracing::subscriber::set_global_default(subscriber).expect("failed to set subscriber");
 
-    let opt = Opt::from_args();
+    let opt = Opt::parse();
     trace!(?opt);
 
     let sess = Session::default();
