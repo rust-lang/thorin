@@ -1,6 +1,6 @@
 use std::{collections::HashSet, fmt};
 
-use gimli::{Encoding, RunTimeEndian, UnitHeader, UnitIndex, UnitSectionOffset, UnitType};
+use gimli::{Encoding, RunTimeEndian, UnitHeader, UnitIndex, UnitType};
 use object::{
     write::{Object as WritableObject, SectionId},
     BinaryFormat, Object, ObjectSection, SectionKind,
@@ -113,8 +113,7 @@ pub(crate) fn dwo_identifier_of_unit<R: gimli::Reader>(
                 gimli::DW_TAG_compile_unit | gimli::DW_TAG_type_unit => (),
                 _ => return Err(Error::TopLevelDieNotUnit),
             }
-            let mut attrs = root.attrs();
-            while let Some(attr) = attrs.next().map_err(Error::ParseUnitAttribute)? {
+            for attr in root.attrs() {
                 match (attr.name(), attr.value()) {
                     (gimli::constants::DW_AT_GNU_dwo_id, gimli::AttributeValue::DwoId(dwo_id)) => {
                         return Ok(Some(DwarfObject::Compilation(dwo_id.into())))
@@ -615,15 +614,11 @@ impl<'file> InProgressDwarfPackage<'file> {
                     .length_including_self()
                     .try_into()
                     .expect("unit header length larger than u64");
-                let offset = match header.offset() {
-                    UnitSectionOffset::DebugInfoOffset(offset) => offset.0,
-                    UnitSectionOffset::DebugTypesOffset(offset) => offset.0,
-                };
 
                 let data = section
                     .compressed_data_range(
                         sess,
-                        offset.try_into().expect("offset larger than u64"),
+                        header.offset().0.try_into().expect("offset larger than u64"),
                         size,
                     )
                     .map_err(Error::DecompressData)?

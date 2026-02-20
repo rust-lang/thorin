@@ -186,10 +186,10 @@ where
                 cursor.next_dfs()?;
                 let root = cursor.current().expect("unit w/out root debugging information entry");
 
-                let dwo_name = if let Some(val) = root.attr_value(gimli::DW_AT_dwo_name)? {
+                let dwo_name = if let Some(val) = root.attr_value(gimli::DW_AT_dwo_name) {
                     // DWARF 5
                     val
-                } else if let Some(val) = root.attr_value(gimli::DW_AT_GNU_dwo_name)? {
+                } else if let Some(val) = root.attr_value(gimli::DW_AT_GNU_dwo_name) {
                     // GNU Extension
                     val
                 } else {
