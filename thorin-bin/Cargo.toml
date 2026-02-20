@@ -8,11 +8,11 @@ keywords = ["dwarf", "split-dwarf", "dwarf-package", "dwarf-object", "dwp"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/rust-lang/thorin"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 
 [dependencies]
-thorin-dwp = { version = "0.9.0", path = "../thorin" }
+thorin-dwp = { version = "0.10.0", path = "../thorin" }
 
 anyhow = "1.0.102"
 clap = { version = "4.5.60", features = ["derive"] }
