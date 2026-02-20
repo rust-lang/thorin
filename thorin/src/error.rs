@@ -64,8 +64,6 @@ pub enum Error {
     MissingRequiredSection(&'static str),
     /// Failed to parse unit abbreviations.
     ParseUnitAbbreviations(gimli::read::Error),
-    /// Failed to parse unit attribute.
-    ParseUnitAttribute(gimli::read::Error),
     /// Failed to parse unit header.
     ParseUnitHeader(gimli::read::Error),
     /// Failed to parse unit.
@@ -137,7 +135,6 @@ impl StdError for Error {
             Error::TopLevelDieNotUnit => None,
             Error::MissingRequiredSection(_) => None,
             Error::ParseUnitAbbreviations(source) => Some(source.as_dyn_error()),
-            Error::ParseUnitAttribute(source) => Some(source.as_dyn_error()),
             Error::ParseUnitHeader(source) => Some(source.as_dyn_error()),
             Error::ParseUnit(source) => Some(source.as_dyn_error()),
             Error::IncompatibleIndexVersion(_, _, _) => None,
@@ -208,7 +205,6 @@ impl fmt::Display for Error {
                 write!(f, "Input object missing required section `{}`", section)
             }
             Error::ParseUnitAbbreviations(_) => write!(f, "Failed to parse unit abbreviations"),
-            Error::ParseUnitAttribute(_) => write!(f, "Failed to parse unit attribute"),
             Error::ParseUnitHeader(_) => write!(f, "Failed to parse unit header"),
             Error::ParseUnit(_) => write!(f, "Failed to parse unit"),
             Error::IncompatibleIndexVersion(section, format, actual) => {
