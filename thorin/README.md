@@ -43,8 +43,8 @@ You could also call this project <code>rust-dwp</code>, if you'd prefer that.
 
 #### Author and acknowledgements
 <sup>
-<code>thorin</code> is authored by <a href="https://davidtw.co">David Wood</a> of <i>Huawei
-Technologies Research & Development (UK) Ltd</i>. <code>thorin</code> is maintained by the
+<code>thorin</code> is authored by <a href="https://davidtw.co">David Wood</a>.
+<code>thorin</code> is maintained by the
 <a href="https://rust-lang.org/governance/teams/compiler">Rust Compiler Team</a>.
 </sup>
 
