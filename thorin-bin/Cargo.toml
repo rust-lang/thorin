@@ -1,6 +1,6 @@
 [package]
 name = "thorin-dwp-bin"
-authors = [ "David Wood <david.wood@huawei.com>" ]
+authors = [ "David Wood <david.wood2@arm.com>" ]
 categories = ["development-tools::debugging", "command-line-utilities"]
 description = "Merge DWARF objects and packages into DWARF packages"
 homepage = "https://github.com/rust-lang/thorin"

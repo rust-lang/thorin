@@ -1,6 +1,6 @@
 [package]
 name = "thorin-dwp"
-authors = [ "David Wood <david.wood@huawei.com>" ]
+authors = [ "David Wood <david.wood2@arm.com>" ]
 categories = ["development-tools::debugging"]
 description = "Library for building DWARF packages from input DWARF objects and packages"
 homepage = "https://docs.rs/thorin-dwp"
