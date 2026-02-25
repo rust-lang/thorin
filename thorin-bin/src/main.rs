@@ -7,9 +7,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use clap::Parser;
 use memmap2::Mmap;
 use object::write::StreamingBuffer;
-use structopt::StructOpt;
 use thiserror::Error;
 use tracing::trace;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
@@ -30,17 +30,17 @@ enum Error {
     EmitOutputObject,
 }
 
-#[derive(Debug, StructOpt)]
-#[structopt(name = "thorin", about = "merge dwarf objects into dwarf packages")]
-struct Opt {
+/// merge dwarf objects into dwarf packages
+#[derive(Debug, Parser)]
+#[command(name = "thorin", version, verbatim_doc_comment)]
+struct Cli {
     /// Specify path to input dwarf objects and packages
-    #[structopt(parse(from_os_str))]
     inputs: Vec<PathBuf>,
     /// Specify path to executables to read list of dwarf objects from
-    #[structopt(short = "e", long = "exec", parse(from_os_str))]
+    #[arg(short, long = "exec")]
     executables: Vec<PathBuf>,
     /// Specify path to write the dwarf package to [default: -]
-    #[structopt(short = "o", long = "output", parse(from_os_str))]
+    #[arg(short, long = "output")]
     output: Option<PathBuf>,
 }
 
@@ -139,24 +139,24 @@ fn main() -> Result<()> {
     );
     tracing::subscriber::set_global_default(subscriber).expect("failed to set subscriber");
 
-    let opt = Opt::from_args();
-    trace!(?opt);
+    let args = Cli::parse();
+    trace!(?args);
 
     let sess = Session::default();
     let mut package = thorin::DwarfPackage::new(&sess);
 
     // Return early if there isn't any input.
-    if opt.inputs.is_empty() && opt.executables.is_empty() {
+    if args.inputs.is_empty() && args.executables.is_empty() {
         return Ok(());
     }
 
-    for input in &opt.inputs {
+    for input in &args.inputs {
         package
             .add_input_object(input)
             .with_context(|| Error::AddInputObject(input.display().to_string()))?;
     }
 
-    for executable in &opt.executables {
+    for executable in &args.executables {
         // Failing to read the referenced object might be expected if the path referenced by
         // the executable isn't found but the referenced DWARF object is later found as an
         // input - calling `finish` will return an error in this case.
@@ -165,9 +165,9 @@ fn main() -> Result<()> {
             .with_context(|| Error::AddExecutable(executable.display().to_string()))?;
     }
 
-    let output = opt.output.unwrap_or_else(|| {
-        if opt.executables.len() == 1 {
-            let mut path = opt.executables.first().unwrap().clone().into_os_string();
+    let output = args.output.unwrap_or_else(|| {
+        if args.executables.len() == 1 {
+            let mut path = args.executables.first().unwrap().clone().into_os_string();
             path.push(".dwp");
             PathBuf::from(path)
         } else {

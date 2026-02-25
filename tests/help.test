@@ -1,6 +1,5 @@
 # RUN: thorin --help | FileCheck %s --check-prefix HELP
 
-# HELP: USAGE
-# HELP: FLAGS
-# HELP: OPTIONS
-# HELP: ARGS
+# HELP: Usage
+# HELP: Arguments
+# HELP: Options
