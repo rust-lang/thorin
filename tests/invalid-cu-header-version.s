@@ -4,7 +4,7 @@
 
 # CHECK: Error: Failed to add `{{.*}}/invalid-cu-header-version.s.tmp.dwo` to DWARF package
 # CHECK:  0: Failed to parse unit header
-# CHECK:  1: Hit the end of input before it was expected
+# CHECK:  1: unexpected end of input
 
     .section	.debug_info.dwo,"e",@progbits
     .long	0 # Length of Unit

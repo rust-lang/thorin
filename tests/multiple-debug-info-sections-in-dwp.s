@@ -3,7 +3,7 @@
 
 # CHECK: Error: Failed to add `{{.*}}/multiple-debug-info-sections-in-dwp.s.tmp.dwp` to DWARF package
 # CHECK:  0: Failed to parse `.debug_cu_index` index section
-# CHECK:  1: Hit the end of input before it was expected
+# CHECK:  1: unexpected end of input
 
     .section	.debug_info.dwo,"G",@progbits,0xFDFDFDFD,comdat
     .long	.Ldebug_info_dwo_end1-.Ldebug_info_dwo_start1 # Length of Unit

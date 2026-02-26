@@ -1,5 +1,4 @@
 RUN: not thorin %p/inputs/invalid-string-form.dwo -o %t 2>&1 | FileCheck %s
 
 CHECK: Error: Failed to add `{{.*}}/invalid-string-form.dwo` to DWARF package
-CHECK:  0: Failed to parse unit attribute
-CHECK:  1: Found an unknown `DW_FORM_*` type
+CHECK:  unknown attribute form: 0x1e02
