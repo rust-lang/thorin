@@ -3,7 +3,7 @@
 
 # CHECK: Error: Failed to add `{{.*}}/wrong-unit-type-info-v4.s.tmp.dwp` to DWARF package
 # CHECK:  0: Failed to parse unit
-# CHECK:  1: Hit the end of input before it was expected
+# CHECK:  1: unexpected end of input
 
   .section	.debug_info.dwo,"e",@progbits
   .long	.Ldebug_info_dwo_end0-.Ldebug_info_dwo_start0 # Length of Unit

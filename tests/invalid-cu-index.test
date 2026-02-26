@@ -2,4 +2,4 @@ RUN: not thorin %p/inputs/invalid-cu-index.dwp -o %t 2>&1 | FileCheck %s
 
 CHECK: Error: Failed to add `{{.*}}/invalid-cu-index.dwp` to DWARF package
 CHECK:  0: Failed to parse `.debug_cu_index` index section
-CHECK:  1: Hit the end of input before it was expected
+CHECK:  1: unexpected end of input

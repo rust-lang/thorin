@@ -4,7 +4,7 @@
 
 # CHECK: Error: Failed to add `{{.*}}/no-cu-found.s.tmp.dwo` to DWARF package
 # CHECK:  0: Failed to parse unit header
-# CHECK:  1: The `DW_UT_*` value for this unit is not supported yet
+# CHECK:  1: unknown unit type: 0xc
 
 	.section	.debug_info.dwo,"e",@progbits
 	.long	.Ldebug_info_dwo_end0-.Ldebug_info_dwo_start0 # Length of Unit

@@ -3,7 +3,7 @@
 
 # CHECK: Error: Failed to add `{{.*}}/missing-tu-index.test.tmp.dwp` to DWARF package
 # CHECK:  0: Failed to parse `.debug_tu_index` index section
-# CHECK:  1: Hit the end of input before it was expected
+# CHECK:  1: unexpected end of input
 
 .section .debug_abbrev.dwo, "e", @progbits
 .LAbbrevBegin:
