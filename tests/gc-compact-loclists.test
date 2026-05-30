@@ -1,0 +1,74 @@
+# Test that GC compacts the .debug_loclists.dwo offset table by removing
+# entries for location lists only referenced by dead subprograms, and that
+# surviving DIEs' loclistx attributes are correctly renumbered.
+#
+# The .dwo has 3 location lists (loclistx 0, 1, 2). The live subprogram's
+# variable uses loclistx 1. After GC the dead entries at indices 0 and 2
+# are removed, so the surviving variable's loclistx must be renumbered
+# from 1 to 0. Without the fix, the old index is copied verbatim and the
+# location list resolves incorrectly.
+
+# Assemble the .dwo (split debug info).
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-compact-loclists-dwo.s -o %t.dwo
+
+# Generate the exec assembly with the .dwo path substituted in, then assemble it.
+# RUN: sed 's|DWO_PATH|%t.dwo|' %p/inputs/gc-compact-loclists-exec.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t.o
+
+# Baseline: all subprograms and location lists survive when not garbage-collecting.
+# RUN: thorin -e %t.o -o %t-nogc.dwp
+# RUN: llvm-dwarfdump -debug-info -debug-loclists %t-nogc.dwp | FileCheck --check-prefixes=CHECK,NOGC %s
+
+# With garbage collection the dead subprograms are removed and loclists compacted.
+# RUN: thorin --gc -e %t.o -o %t-gc.dwp
+# RUN: llvm-dwarfdump -debug-info -debug-loclists %t-gc.dwp | FileCheck --check-prefixes=CHECK,GC %s
+
+# -- debug_info checks --
+# CHECK:        .debug_info.dwo contents:
+# CHECK:        DW_TAG_compile_unit
+
+# Without GC, dead_func1 comes first.
+# NOGC:          DW_TAG_subprogram
+# NOGC:            DW_AT_name	("dead_func1")
+
+# The live subprogram must always be present.
+# CHECK:          DW_TAG_subprogram
+# CHECK:            DW_AT_name	("live_func")
+
+# Its variable with a location list must survive.
+# Without GC the original loclistx index 1 is preserved.
+# NOGC:            DW_TAG_variable
+# NOGC:              DW_AT_location	(indexed (0x1) loclist =
+# NOGC:                 <default>: DW_OP_reg1 RDX)
+
+# After GC the loclistx must be renumbered from 1 to 0.
+# GC:              DW_TAG_variable
+# GC:                DW_AT_location	(indexed (0x0) loclist =
+# GC:                   <default>: DW_OP_reg1 RDX)
+
+# Without GC, dead_func2 is also present.
+# NOGC:          DW_TAG_subprogram
+# NOGC:            DW_AT_name	("dead_func2")
+
+# After GC there must be no further subprograms.
+# GC:          NULL
+# GC-NOT:      DW_TAG_subprogram
+
+# -- loclists checks --
+# CHECK:        .debug_loclists.dwo contents:
+
+# Without GC the offset table has 3 entries.
+# NOGC:        offset_entry_count = 0x00000003
+# NOGC:        offsets: [
+# NOGC:        0x{{[0-9a-f]+}}
+# NOGC-NEXT:   0x{{[0-9a-f]+}}
+# NOGC-NEXT:   0x{{[0-9a-f]+}}
+# NOGC-NEXT:   ]
+
+# After GC the offset table has only 1 entry (compacted).
+# GC:          offset_entry_count = 0x00000001
+# GC:          offsets: [
+# GC:          0x{{[0-9a-f]+}}
+# GC-NEXT:     ]
+
+# The surviving location list data is correct.
+# GC:          <default>: DW_OP_reg1 RDX

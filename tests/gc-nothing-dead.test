@@ -1,0 +1,30 @@
+# Test that when nothing is dead, GC leaves the output unchanged — both
+# subprograms survive with and without --gc.
+
+# Assemble the .dwo (split debug info).
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-nothing-dead-dwo.s -o %t.dwo
+
+# Generate the exec assembly with the .dwo path substituted in, then assemble it.
+# RUN: sed 's|DWO_PATH|%t.dwo|' %p/inputs/gc-nothing-dead-exec.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t.o
+
+# Both with and without garbage collection the output should be identical.
+# RUN: thorin -e %t.o -o %t-nogc.dwp
+# RUN: llvm-dwarfdump -v %t-nogc.dwp | FileCheck %s
+
+# RUN: thorin --gc -e %t.o -o %t-gc.dwp
+# RUN: llvm-dwarfdump -v %t-gc.dwp | FileCheck %s
+
+# CHECK:        .debug_info.dwo contents:
+# CHECK:        DW_TAG_compile_unit
+
+# First subprogram (addrx 0, live).
+# CHECK:          DW_TAG_subprogram
+# CHECK-NEXT:       DW_AT_low_pc [DW_FORM_addrx1] (indexed (00000000)
+
+# Second subprogram (addrx 1, live).
+# CHECK:          DW_TAG_subprogram
+# CHECK-NEXT:       DW_AT_low_pc [DW_FORM_addrx1] (indexed (00000001)
+
+# After the last subprogram, the compile_unit's children end.
+# CHECK:        NULL
+# CHECK-NOT:    DW_TAG_subprogram

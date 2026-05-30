@@ -1,6 +1,6 @@
-use std::{collections::HashSet, fmt};
+use std::{borrow::Cow, collections::HashSet, fmt};
 
-use gimli::{Encoding, RunTimeEndian, UnitHeader, UnitIndex, UnitType};
+use gimli::{Encoding, RunTimeEndian, Section, UnitHeader, UnitIndex, UnitType};
 use object::{
     write::{Object as WritableObject, SectionId},
     BinaryFormat, Object, ObjectSection, SectionKind,
@@ -11,15 +11,15 @@ use crate::{
     error::{Error, Result},
     ext::{CompressedDataRangeExt, EndianityExt, IndexSectionExt, PackageFormatExt},
     index::{write_index, Bucketable, Contribution, ContributionOffset, IndexEntry},
-    relocate::RelocationMap,
+    relocate::{Relocate, RelocationMap},
     strings::PackageStringTable,
-    Session,
+    GarbageCollectionData, Session,
 };
 
 /// New-type'd index (constructed from `gimli::DwoId`) with a custom `Debug` implementation to
 /// print in hexadecimal.
 #[derive(Copy, Clone, Eq, Hash, PartialEq)]
-pub(crate) struct DwoId(pub(crate) u64);
+pub struct DwoId(pub(crate) u64);
 
 impl Bucketable for DwoId {
     fn index(&self) -> u64 {
@@ -105,7 +105,7 @@ pub(crate) fn dwo_identifier_of_unit<R: gimli::Reader>(
         // Compilation units with GNU Extension
         UnitType::Compilation => {
             let abbreviations =
-                header.abbreviations(&debug_abbrev).map_err(Error::ParseUnitAbbreviations)?;
+                header.abbreviations(debug_abbrev).map_err(Error::ParseUnitAbbreviations)?;
             let mut cursor = header.entries(&abbreviations);
             cursor.next_dfs()?;
             let root = cursor.current().ok_or(Error::NoDie)?;
@@ -114,11 +114,10 @@ pub(crate) fn dwo_identifier_of_unit<R: gimli::Reader>(
                 _ => return Err(Error::TopLevelDieNotUnit),
             }
             for attr in root.attrs() {
-                match (attr.name(), attr.value()) {
-                    (gimli::constants::DW_AT_GNU_dwo_id, gimli::AttributeValue::DwoId(dwo_id)) => {
-                        return Ok(Some(DwarfObject::Compilation(dwo_id.into())))
-                    }
-                    _ => (),
+                if let (gimli::constants::DW_AT_GNU_dwo_id, gimli::AttributeValue::DwoId(dwo_id)) =
+                    (attr.name(), attr.value())
+                {
+                    return Ok(Some(DwarfObject::Compilation(dwo_id.into())));
                 }
             }
 
@@ -363,6 +362,264 @@ impl<'file> DwarfPackageObject<'file> {
     }
 }
 
+pub(crate) struct GcSessionData<'input, 'gc, 'session, Relocations, Sess>
+where
+    Sess: Session<Relocations>,
+{
+    session: &'session Sess,
+    gc_data: &'gc GarbageCollectionData<'session, Relocations, Sess>,
+    debug_loc: Cow<'input, [u8]>,
+    debug_loclists: Cow<'input, [u8]>,
+    debug_rnglists: Cow<'input, [u8]>,
+    debug_str_offsets: gimli::DebugStrOffsets<gimli::EndianSlice<'input, RunTimeEndian>>,
+    debug_str: gimli::DebugStr<gimli::EndianSlice<'input, RunTimeEndian>>,
+}
+
+pub(crate) enum SessionHolder<'input, 'gc, 'session, Relocations, Sess>
+where
+    Sess: Session<Relocations>,
+{
+    SimpleSession(&'session Sess),
+    GcSession(GcSessionData<'input, 'gc, 'session, Relocations, Sess>),
+}
+
+impl<'input, 'gc, 'session, Relocations, Sess>
+    SessionHolder<'input, 'gc, 'session, Relocations, Sess>
+where
+    Sess: Session<Relocations>,
+{
+    fn session(&'_ self) -> &'session Sess {
+        match self {
+            SessionHolder::SimpleSession(session)
+            | SessionHolder::GcSession(GcSessionData { session, .. }) => session,
+        }
+    }
+
+    fn save_debug_loc_for_gc(&mut self, debug_loc: Cow<'input, [u8]>) -> Option<Cow<'input, [u8]>> {
+        let SessionHolder::GcSession(ref mut data) = self else {
+            return Some(debug_loc);
+        };
+
+        data.debug_loc = debug_loc;
+        None
+    }
+
+    fn save_debug_loclists_for_gc(
+        &mut self,
+        debug_loclists: Cow<'input, [u8]>,
+    ) -> Option<Cow<'input, [u8]>> {
+        let SessionHolder::GcSession(ref mut data) = self else {
+            return Some(debug_loclists);
+        };
+
+        data.debug_loclists = debug_loclists;
+        None
+    }
+
+    fn save_debug_rnglists_for_gc(
+        &mut self,
+        debug_rnglists: Cow<'input, [u8]>,
+    ) -> Option<Cow<'input, [u8]>> {
+        let SessionHolder::GcSession(ref mut data) = self else {
+            return Some(debug_rnglists);
+        };
+
+        data.debug_rnglists = debug_rnglists;
+        None
+    }
+
+    fn save_debug_str_offsets_for_gc(
+        &mut self,
+        debug_str_offsets: gimli::DebugStrOffsets<gimli::EndianSlice<'input, RunTimeEndian>>,
+    ) -> bool {
+        let SessionHolder::GcSession(ref mut data) = self else {
+            return false;
+        };
+
+        data.debug_str_offsets = debug_str_offsets;
+        true
+    }
+
+    fn save_debug_str_for_gc(
+        &mut self,
+        debug_str: gimli::DebugStr<gimli::EndianSlice<'input, RunTimeEndian>>,
+    ) -> bool {
+        let SessionHolder::GcSession(ref mut data) = self else {
+            return false;
+        };
+
+        data.debug_str = debug_str;
+        true
+    }
+}
+
+impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
+    SessionHolder<'input, 'gc, 'session, RelocationMap, S>
+{
+    fn maybe_gc(
+        &mut self,
+        id: DwarfObject,
+        encoding: Encoding,
+        debug_info: &'input [u8],
+        obj: &mut DwarfPackageObject<'_>,
+        string_table: &mut PackageStringTable,
+        debug_abbrev: &gimli::DebugAbbrev<gimli::EndianSlice<'input, RunTimeEndian>>,
+        endian: RunTimeEndian,
+        has_type_units: bool,
+        has_debug_macro: bool,
+        debug_rnglists: &mut Option<Contribution>,
+        debug_loc: &mut Option<Contribution>,
+        debug_loclists: &mut Option<Contribution>,
+        debug_str_offsets: &mut Option<Contribution>,
+    ) -> Result<Option<&'input [u8]>> {
+        let SessionHolder::GcSession(ref mut data) = self else {
+            return Ok(None);
+        };
+        let DwarfObject::Compilation(dwo_id) = id else {
+            return Ok(None);
+        };
+        let Some((executable_data, dwo_data)) = data.gc_data.get_data_for_dwo(dwo_id) else {
+            return Ok(None);
+        };
+
+        let addr_resolver = |index| {
+            executable_data
+                .0
+                .debug_addr
+                .get_address(dwo_data.addr_size, dwo_data.addr_base, index)
+                .map(Some)
+                .map_err(Into::into)
+        };
+
+        let mut gc_result = crate::gc::gc_debug_info(
+            gimli::DebugInfo::new(debug_info, endian),
+            *debug_abbrev,
+            gimli::LocationLists::new(
+                gimli::DebugLoc::from(gimli::EndianSlice::new(&data.debug_loc, endian)),
+                gimli::DebugLocLists::from(gimli::EndianSlice::new(&data.debug_loclists, endian)),
+            ),
+            gimli::RangeLists::new(executable_data.0.ranges.debug_ranges().clone(), {
+                // NB: .debug_ranges has to be relocated because it lives in
+                // the executable. A .dwo's .debug_rnglists shouldn't need to
+                // be relocated, but we have to make the types match for gimli.
+                // Create a no-op Relocate for this data.
+                let relocations = data.session.alloc_relocation(RelocationMap::default());
+                let section = gimli::EndianSlice::new(&data.debug_rnglists, endian);
+                let reader = section;
+                gimli::DebugRngLists::from(Relocate { relocations, section, reader })
+            }),
+            addr_resolver,
+            dwo_id,
+            has_type_units,
+        )?;
+
+        macro_rules! update {
+            ($target:ident += $source:expr) => {
+                if let Some(other) = $source {
+                    let contribution = $target.get_or_insert(Contribution { size: 0, ..other });
+                    contribution.size += other.size;
+                }
+                debug!(?$target);
+            };
+        }
+
+        if !data.debug_rnglists.is_empty() {
+            let data = if let Some(ref referenced) = gc_result.referenced_rnglists {
+                let rewritten = crate::gc::rewrite_rnglists(
+                    gimli::EndianSlice::new(&data.debug_rnglists, endian),
+                    referenced,
+                    &addr_resolver,
+                    dwo_id,
+                )?;
+                match rewritten {
+                    Some(v) => data.session.alloc_data(v),
+                    None => &data.debug_rnglists,
+                }
+            } else {
+                &data.debug_rnglists
+            };
+            update!(debug_rnglists += obj.append_to_debug_rnglists(data));
+        }
+        if !data.debug_loc.is_empty() {
+            let data = if let Some(ref remap) = gc_result.offset_remap {
+                let patched = crate::gc::patch_debug_loc(
+                    gimli::EndianSlice::new(&data.debug_loc, endian),
+                    encoding,
+                    remap,
+                )?;
+                match patched {
+                    Some(v) => data.session.alloc_data(v),
+                    None => &data.debug_loc,
+                }
+            } else {
+                &data.debug_loc
+            };
+            update!(debug_loc += obj.append_to_debug_loc(data));
+        }
+        if !data.debug_loclists.is_empty() {
+            let loclists_slice = gimli::EndianSlice::new(&data.debug_loclists, endian);
+            let remap = gc_result.offset_remap.as_ref();
+
+            let data = if let Some(ref referenced) = gc_result.referenced_loclists {
+                let rewritten =
+                    crate::gc::rewrite_loclists(loclists_slice, Some(referenced), remap)?;
+                match rewritten {
+                    Some(v) => data.session.alloc_data(v),
+                    None => &data.debug_loclists,
+                }
+            } else if remap.is_some() {
+                // Pruning disabled (sec_offset / type units), but expressions
+                // may still need patching after GC moved DIEs.
+                let rewritten = crate::gc::rewrite_loclists(loclists_slice, None, remap)?;
+                match rewritten {
+                    Some(v) => data.session.alloc_data(v),
+                    None => &data.debug_loclists,
+                }
+            } else {
+                &data.debug_loclists
+            };
+            update!(debug_loclists += obj.append_to_debug_loclists(data));
+        }
+
+        // If a .debug_macro section is present, we cannot safely
+        // prune .debug_str_offsets since .debug_macro may reference
+        // entries we don't track.
+        if has_debug_macro {
+            gc_result.referenced_str_offsets = None;
+        }
+
+        if !data.debug_str_offsets.reader().is_empty() {
+            let filter =
+                gc_result.rewritten.as_ref().and(gc_result.referenced_str_offsets.as_ref());
+            let remapped = string_table.remap_str_offsets_section(
+                data.debug_str,
+                data.debug_str_offsets,
+                endian,
+                encoding,
+                filter,
+            )?;
+            update!(debug_str_offsets += obj.append_to_debug_str_offsets(remapped.slice()));
+        }
+
+        Ok(gc_result.rewritten.map(|r| data.session.alloc_data(r.into_vec())))
+    }
+
+    pub(crate) fn new_gc(
+        sess: &'session S,
+        gc_data: &'gc GarbageCollectionData<'session, RelocationMap, S>,
+    ) -> Self {
+        SessionHolder::GcSession(GcSessionData {
+            session: sess,
+            gc_data,
+            debug_loc: Default::default(),
+            debug_loclists: Default::default(),
+            debug_rnglists: Default::default(),
+            debug_str_offsets: Default::default(),
+            debug_str: Default::default(),
+        })
+    }
+}
+
 /// In-progress DWARF package being produced.
 pub(crate) struct InProgressDwarfPackage<'file> {
     /// Endianness of the DWARF package being created.
@@ -417,22 +674,22 @@ impl<'file> InProgressDwarfPackage<'file> {
     ///
     /// Copies relevant debug sections, compilation/type units and strings from the `input` DWARF
     /// object into this DWARF package.
-    #[tracing::instrument(level = "trace", skip(sess, input,))]
-    pub(crate) fn add_input_object<'input, 'session: 'input>(
+    #[tracing::instrument(level = "trace", skip(sess, input))]
+    pub(crate) fn add_input_object<'input, 'gc, 'session: 'input>(
         &mut self,
-        sess: &'session impl Session<RelocationMap>,
+        mut sess: SessionHolder<'input, 'gc, 'session, RelocationMap, impl Session<RelocationMap>>,
         input: &object::File<'input>,
         encoding: Encoding,
     ) -> Result<()> {
         // Load index sections (if they exist).
         let cu_index = maybe_load_index_section::<_, gimli::DebugCuIndex<_>, _, _>(
-            sess,
+            sess.session(),
             encoding,
             self.endian,
             input,
         )?;
         let tu_index = maybe_load_index_section::<_, gimli::DebugTuIndex<_>, _, _>(
-            sess,
+            sess.session(),
             encoding,
             self.endian,
             input,
@@ -471,11 +728,15 @@ impl<'file> InProgressDwarfPackage<'file> {
                 }
                 Ok(".debug_loc.dwo" | ".zdebug_loc.dwo") => {
                     let data = section.compressed_data()?.decompress()?;
-                    update!(debug_loc += self.obj.append_to_debug_loc(&data));
+                    if let Some(data) = sess.save_debug_loc_for_gc(data) {
+                        update!(debug_loc += self.obj.append_to_debug_loc(&data));
+                    }
                 }
                 Ok(".debug_loclists.dwo" | ".zdebug_loclists.dwo") => {
                     let data = section.compressed_data()?.decompress()?;
-                    update!(debug_loclists += self.obj.append_to_debug_loclists(&data));
+                    if let Some(data) = sess.save_debug_loclists_for_gc(data) {
+                        update!(debug_loclists += self.obj.append_to_debug_loclists(&data));
+                    }
                 }
                 Ok(".debug_macinfo.dwo" | ".zdebug_macinfo.dwo") => {
                     let data = section.compressed_data()?.decompress()?;
@@ -487,41 +748,41 @@ impl<'file> InProgressDwarfPackage<'file> {
                 }
                 Ok(".debug_rnglists.dwo" | ".zdebug_rnglists.dwo") => {
                     let data = section.compressed_data()?.decompress()?;
-                    update!(debug_rnglists += self.obj.append_to_debug_rnglists(&data));
+                    if let Some(data) = sess.save_debug_rnglists_for_gc(data) {
+                        update!(debug_rnglists += self.obj.append_to_debug_rnglists(&data));
+                    }
                 }
                 Ok(".debug_str_offsets.dwo" | ".zdebug_str_offsets.dwo") => {
-                    let (debug_str_offsets_section, debug_str_offsets_section_len) = {
-                        let data = section.compressed_data()?.decompress()?;
-                        let len = data.len() as u64;
-                        let data_ref = sess.alloc_owned_cow(data);
-                        (
-                            gimli::DebugStrOffsets::from(gimli::EndianSlice::new(
-                                data_ref,
-                                self.endian,
-                            )),
-                            len,
-                        )
-                    };
+                    let data = section.compressed_data()?.decompress()?;
+                    let data_ref = sess.session().alloc_owned_cow(data);
 
+                    let debug_str_offsets_section = gimli::DebugStrOffsets::from(
+                        gimli::EndianSlice::new(data_ref, self.endian),
+                    );
                     let debug_str_section =
-                        if let Some(section) = input.section_by_name(".debug_str.dwo") {
-                            let data = section.compressed_data()?.decompress()?;
-                            let data_ref = sess.alloc_owned_cow(data);
-                            gimli::DebugStr::new(data_ref, self.endian)
+                        if let Some(str_section) = input.section_by_name(".debug_str.dwo") {
+                            let str_data = str_section.compressed_data()?.decompress()?;
+                            let str_data_ref = sess.session().alloc_owned_cow(str_data);
+                            gimli::DebugStr::new(str_data_ref, self.endian)
                         } else {
                             return Err(Error::MissingRequiredSection(".debug_str.dwo"));
                         };
-
-                    let data = self.string_table.remap_str_offsets_section(
-                        debug_str_section,
-                        debug_str_offsets_section,
-                        debug_str_offsets_section_len,
-                        self.endian,
-                        encoding,
-                    )?;
-                    update!(
-                        debug_str_offsets += self.obj.append_to_debug_str_offsets(data.slice())
-                    );
+                    let saved_offsets =
+                        sess.save_debug_str_offsets_for_gc(debug_str_offsets_section);
+                    let saved_str = sess.save_debug_str_for_gc(debug_str_section);
+                    if !saved_offsets && !saved_str {
+                        let remapped = self.string_table.remap_str_offsets_section(
+                            debug_str_section,
+                            debug_str_offsets_section,
+                            self.endian,
+                            encoding,
+                            None,
+                        )?;
+                        update!(
+                            debug_str_offsets +=
+                                self.obj.append_to_debug_str_offsets(remapped.slice())
+                        );
+                    }
                 }
                 _ => (),
             }
@@ -532,7 +793,7 @@ impl<'file> InProgressDwarfPackage<'file> {
         let debug_abbrev_section = if let Some(section) = input.section_by_name(".debug_abbrev.dwo")
         {
             let data = section.compressed_data()?.decompress()?;
-            let data_ref = sess.alloc_owned_cow(data);
+            let data_ref = sess.session().alloc_owned_cow(data);
             gimli::DebugAbbrev::new(data_ref, self.endian)
         } else {
             return Err(Error::MissingRequiredSection(".debug_abbrev.dwo"));
@@ -553,6 +814,7 @@ impl<'file> InProgressDwarfPackage<'file> {
 
         let mut seen_debug_info = false;
         let mut seen_debug_types = false;
+        let mut has_type_units = false;
 
         for section in input.sections() {
             let data;
@@ -567,9 +829,20 @@ impl<'file> InProgressDwarfPackage<'file> {
                 Ok(".debug_info.dwo" | ".zdebug_info.dwo") => {
                     data = section.compressed_data()?.decompress()?;
                     seen_debug_info = true;
-                    UnitHeaderIterator::DebugInfo(
-                        gimli::DebugInfo::new(&data, self.endian).units(),
-                    )
+                    let debug_info = gimli::DebugInfo::new(&data, self.endian);
+                    let mut prescan = debug_info.units();
+                    while let Some(h) =
+                        prescan.next().map_err(Error::ParseUnitHeader)?
+                    {
+                        if matches!(
+                            h.type_(),
+                            UnitType::SplitType { .. } | UnitType::Type { .. }
+                        ) {
+                            has_type_units = true;
+                            break;
+                        }
+                    }
+                    UnitHeaderIterator::DebugInfo(debug_info.units())
                 }
                 Ok(".debug_types.dwo" | ".zdebug_types.dwo")
                     // Report an error if a input DWARF package has multiple `.debug_types`
@@ -617,12 +890,30 @@ impl<'file> InProgressDwarfPackage<'file> {
 
                 let data = section
                     .compressed_data_range(
-                        sess,
+                        sess.session(),
                         header.offset().0.try_into().expect("offset larger than u64"),
                         size,
                     )
                     .map_err(Error::DecompressData)?
                     .ok_or(Error::EmptyUnit(id.index()))?;
+
+                let data = sess
+                    .maybe_gc(
+                        id,
+                        encoding,
+                        data,
+                        &mut self.obj,
+                        &mut self.string_table,
+                        &debug_abbrev_section,
+                        self.endian,
+                        has_type_units,
+                        debug_macro.is_some(),
+                        &mut debug_rnglists,
+                        &mut debug_loc,
+                        &mut debug_loclists,
+                        &mut debug_str_offsets,
+                    )?
+                    .unwrap_or(data);
 
                 let (debug_info, debug_types) = match (&iter, id) {
                     (UnitHeaderIterator::DebugTypes(_), DwarfObject::Type(_)) => {

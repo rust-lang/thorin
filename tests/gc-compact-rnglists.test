@@ -1,0 +1,69 @@
+# Test that GC compacts the .debug_rnglists.dwo offset table by removing
+# entries for range lists only referenced by dead subprograms, and that
+# surviving DIEs' rnglistx attributes are correctly renumbered.
+#
+# The .dwo has 3 range lists (rnglistx 0, 1, 2). The live subprogram uses
+# rnglistx 1. After GC the dead entries at indices 0 and 2 are removed,
+# so the surviving subprogram's rnglistx must be renumbered from 1 to 0.
+# Without the fix, the old index is copied verbatim and the range list
+# resolves incorrectly.
+
+# Assemble the .dwo (split debug info).
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-compact-rnglists-dwo.s -o %t.dwo
+
+# Generate the exec assembly with the .dwo path substituted in, then assemble it.
+# RUN: sed 's|DWO_PATH|%t.dwo|' %p/inputs/gc-compact-rnglists-exec.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t.o
+
+# Baseline: all subprograms and range lists survive when not garbage-collecting.
+# RUN: thorin -e %t.o -o %t-nogc.dwp
+# RUN: llvm-dwarfdump -debug-info -debug-rnglists %t-nogc.dwp | FileCheck --check-prefixes=CHECK,NOGC %s
+
+# With garbage collection the dead subprograms are removed and rnglists compacted.
+# RUN: thorin --gc -e %t.o -o %t-gc.dwp
+# RUN: llvm-dwarfdump -debug-info -debug-rnglists %t-gc.dwp | FileCheck --check-prefixes=CHECK,GC %s
+
+# -- debug_info checks --
+# CHECK:        .debug_info.dwo contents:
+# CHECK:        DW_TAG_compile_unit
+
+# Without GC, dead_func1 comes first.
+# NOGC:          DW_TAG_subprogram
+# NOGC:            DW_AT_name	("dead_func1")
+
+# The live subprogram must always be present.
+# CHECK:          DW_TAG_subprogram
+
+# Without GC the original rnglistx index 1 is preserved.
+# NOGC:            DW_AT_ranges	(indexed (0x1) rangelist =
+# After GC the rnglistx must be renumbered from 1 to 0.
+# GC:              DW_AT_ranges	(indexed (0x0) rangelist =
+
+# CHECK:            DW_AT_name	("live_func")
+
+# Without GC, dead_func2 is also present.
+# NOGC:          DW_TAG_subprogram
+# NOGC:            DW_AT_name	("dead_func2")
+
+# After GC there must be no further subprograms.
+# GC:          NULL
+# GC-NOT:      DW_TAG_subprogram
+
+# -- rnglists checks --
+# CHECK:        .debug_rnglists.dwo contents:
+
+# Without GC the offset table has 3 entries.
+# NOGC:        offset_entry_count = 0x00000003
+# NOGC:        offsets: [
+# NOGC:        0x{{[0-9a-f]+}}
+# NOGC-NEXT:   0x{{[0-9a-f]+}}
+# NOGC-NEXT:   0x{{[0-9a-f]+}}
+# NOGC-NEXT:   ]
+
+# After GC the offset table has only 1 entry (compacted).
+# GC:          offset_entry_count = 0x00000001
+# GC:          offsets: [
+# GC:          0x{{[0-9a-f]+}}
+# GC-NEXT:     ]
+
+# The surviving range list data for live_func is correct.
+# GC:          [0x{{[0-9a-f]+}}, 0x{{[0-9a-f]+}})

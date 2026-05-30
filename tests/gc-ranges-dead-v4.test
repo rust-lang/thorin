@@ -1,0 +1,55 @@
+# Test that a DW_TAG_subprogram whose DW_AT_ranges (DW_FORM_sec_offset)
+# points to a range list in .debug_ranges where every entry is tombstoned
+# is correctly identified as dead and removed by GC.
+#
+# DWARF4 split DWARF (GNU extension). The range data is in the skeleton
+# executable's .debug_ranges section, referenced by sec_offset from the .dwo.
+#
+# Currently broken: classify_root does not yet evaluate DW_AT_ranges with
+# DW_FORM_sec_offset; it conservatively treats such DIEs as live.
+
+# Assemble the .dwo (split debug info).
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-ranges-dead-v4-dwo.s -o %t.dwo
+
+# Generate the exec assembly with the .dwo path substituted in, then assemble it.
+# RUN: sed 's|DWO_PATH|%t.dwo|' %p/inputs/gc-ranges-dead-v4-exec.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t.o
+
+# Baseline: all DIEs survive when not garbage-collecting.
+# RUN: thorin -e %t.o -o %t-nogc.dwp
+# llvm-dwarfdump exits non-zero because .debug_ranges is not in the .dwp,
+# making the sec_offset values unresolvable. Ignore that exit code.
+# RUN: (llvm-dwarfdump -v %t-nogc.dwp 2>/dev/null || true) | FileCheck --check-prefixes=CHECK,NOGC %s
+
+# With garbage collection the dead subprograms should be removed.
+# RUN: thorin --gc -e %t.o -o %t-gc.dwp
+# RUN: (llvm-dwarfdump -v %t-gc.dwp 2>/dev/null || true) | FileCheck --check-prefixes=CHECK,GC %s
+
+# CHECK:        .debug_info.dwo contents:
+# CHECK:        DW_TAG_compile_unit
+
+# dead_func (all ranges tombstoned) -- dead, removed by GC.
+# NOGC:          DW_TAG_subprogram
+# NOGC:            DW_AT_ranges [DW_FORM_sec_offset]
+# NOGC:            DW_AT_name [DW_FORM_string] ("dead_func")
+
+# dead_base_func (base address tombstoned + offset pair) -- dead, removed by GC.
+# NOGC:          DW_TAG_subprogram
+# NOGC:            DW_AT_ranges [DW_FORM_sec_offset]
+# NOGC:            DW_AT_name [DW_FORM_string] ("dead_base_func")
+
+# In the GC case, dead_func and dead_base_func must not appear.
+# The GC-NOT range extends from compile_unit to the mixed_func name match.
+# GC-NOT:       ("dead_func")
+# GC-NOT:       ("dead_base_func")
+
+# mixed_func (one tombstoned + one live range entry) -- survives GC.
+# CHECK:            DW_AT_name [DW_FORM_string] ("mixed_func")
+
+# live_func (DW_AT_low_pc, live) -- always present.
+# CHECK:          DW_TAG_subprogram
+# CHECK:            DW_AT_low_pc [DW_FORM_GNU_addr_index] (indexed (00000000)
+# CHECK:            DW_AT_name [DW_FORM_string] ("live_func")
+
+# After garbage collection there must be no further subprograms.
+# GC:        NULL
+# GC-NOT:    DW_TAG_subprogram

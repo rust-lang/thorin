@@ -1,0 +1,50 @@
+# Test that a DW_OP_call4 inside a location list entry (referenced via
+# DW_AT_location loclistx into .debug_loclists.dwo) keeps the target
+# subprogram alive even though its low_pc is tombstoned, and that a dead
+# subprogram placed before the live one is correctly removed.
+
+# Assemble the .dwo (split debug info).
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-loclist-dwo.s -o %t.dwo
+
+# Generate the exec assembly with the .dwo path substituted in, then assemble it.
+# RUN: sed 's|DWO_PATH|%t.dwo|' %p/inputs/gc-loclist-exec.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t.o
+
+# Baseline: all DIEs survive when not garbage-collecting.
+# RUN: thorin -e %t.o -o %t-nogc.dwp
+# RUN: llvm-dwarfdump -v %t-nogc.dwp | FileCheck --check-prefixes=CHECK,NOGC %s
+
+# With garbage collection the dead subprogram is removed.
+# RUN: thorin --gc -e %t.o -o %t-gc.dwp
+# RUN: llvm-dwarfdump -v %t-gc.dwp | FileCheck --check-prefixes=CHECK,GC %s
+
+# CHECK:        .debug_info.dwo contents:
+# CHECK:        DW_TAG_compile_unit
+
+# The dead subprogram (addrx 0, tombstoned) is present only in the baseline.
+# NOGC:          DW_TAG_subprogram
+# NOGC-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000000)
+# NOGC-NEXT:       DW_AT_name [DW_FORM_string] ("dead_func")
+
+# The live subprogram (addrx 1) must always be present.
+# CHECK:          DW_TAG_subprogram
+# CHECK-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000001)
+# CHECK-NEXT:       DW_AT_name [DW_FORM_string] ("live_func")
+
+# The variable inside the live subprogram. The loclist expression contains
+# a DW_OP_call4 whose operand must point to the target subprogram.
+# In the baseline the target is at CU-relative 0x34; after GC removes
+# dead_func the target moves to 0x28 and the operand must be patched.
+# CHECK:            DW_TAG_variable
+# NOGC-NEXT:         DW_AT_location [DW_FORM_loclistx] (indexed (0x0) loclist = 0x{{[0-9a-f]+}}:
+# NOGC-NEXT:            <default>: DW_OP_call4 0x34)
+# GC-NEXT:         DW_AT_location [DW_FORM_loclistx] (indexed (0x0) loclist = 0x{{[0-9a-f]+}}:
+# GC-NEXT:            <default>: DW_OP_call4 0x28)
+
+# The target subprogram (addrx 2, tombstoned but kept alive by DW_OP_call4 in loclist).
+# CHECK:          DW_TAG_subprogram
+# CHECK-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000002)
+# CHECK-NEXT:       DW_AT_name [DW_FORM_string] ("target")
+
+# After garbage collection there must be no further subprograms.
+# GC:        NULL
+# GC-NOT:    DW_TAG_subprogram

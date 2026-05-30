@@ -1,0 +1,82 @@
+# Test that GC correctly handles CU-relative reference forms other than ref4:
+# DW_FORM_ref1, DW_FORM_ref2, and DW_FORM_ref_udata. Each form is used as a
+# DW_AT_type reference from a live subprogram to a base_type. A dead subprogram
+# placed before them forces all offsets to shift when GC removes it, exercising
+# the patching logic for each form.
+
+# Assemble the .dwo (split debug info).
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-ref-forms-dwo.s -o %t.dwo
+
+# Generate the exec assembly with the .dwo path substituted in, then assemble it.
+# RUN: sed 's|DWO_PATH|%t.dwo|' %p/inputs/gc-ref-forms-exec.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t.o
+
+# Baseline: all subprograms and base_types survive when not garbage-collecting.
+# RUN: thorin -e %t.o -o %t-nogc.dwp
+# RUN: llvm-dwarfdump -v %t-nogc.dwp | FileCheck --check-prefixes=CHECK,NOGC %s
+
+# With garbage collection the dead subprogram is removed.
+# RUN: thorin --gc -e %t.o -o %t-gc.dwp
+# RUN: llvm-dwarfdump -v %t-gc.dwp | FileCheck --check-prefixes=CHECK,GC %s
+
+# Verify that after GC, the patched ref values point to the correct base_types.
+# RUN: llvm-dwarfdump -v %t-gc.dwp | FileCheck --check-prefix=GCPATCH %s
+
+# CHECK:        .debug_info.dwo contents:
+# CHECK:        DW_TAG_compile_unit
+
+# The dead subprogram (addrx 0, tombstoned) is present only in the baseline.
+# NOGC:          DW_TAG_subprogram
+# NOGC-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000000)
+
+# live_func (addrx 1) with DW_AT_type ref1 -> t_r1.
+# CHECK:          DW_TAG_subprogram
+# CHECK-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000001)
+# CHECK-NEXT:       DW_AT_type [DW_FORM_ref1]
+
+# The base_type "t_r1" must survive.
+# CHECK:          DW_TAG_base_type
+# CHECK-NEXT:       DW_AT_name [DW_FORM_string] ("t_r1")
+
+# live_func2 (addrx 2) with DW_AT_type ref2 -> t_r2.
+# CHECK:          DW_TAG_subprogram
+# CHECK-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000002)
+# CHECK-NEXT:       DW_AT_type [DW_FORM_ref2]
+
+# The base_type "t_r2" must survive.
+# CHECK:          DW_TAG_base_type
+# CHECK-NEXT:       DW_AT_name [DW_FORM_string] ("t_r2")
+
+# live_func3 (addrx 3) with DW_AT_type ref_udata -> t_ru.
+# CHECK:          DW_TAG_subprogram
+# CHECK-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000003)
+# CHECK-NEXT:       DW_AT_type [DW_FORM_ref_udata]
+
+# The base_type "t_ru" must survive.
+# CHECK:          DW_TAG_base_type
+# CHECK-NEXT:       DW_AT_name [DW_FORM_string] ("t_ru")
+
+# After garbage collection there must be no further subprograms.
+# GC:        NULL
+# GC-NOT:    DW_TAG_subprogram
+
+# Verify that after GC, each ref form points to the correct base_type.
+# Capture the ref target from each live subprogram and verify the base_type is there.
+# GCPATCH:        .debug_info.dwo contents:
+
+# GCPATCH:          DW_TAG_subprogram
+# GCPATCH-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000001)
+# GCPATCH-NEXT:       DW_AT_type [DW_FORM_ref1] (cu + 0x{{[0-9a-f]+}} => {[[R1OFF:0x[0-9a-f]+]]}
+# GCPATCH:        [[R1OFF]]: DW_TAG_base_type
+# GCPATCH-NEXT:       DW_AT_name [DW_FORM_string] ("t_r1")
+
+# GCPATCH:          DW_TAG_subprogram
+# GCPATCH-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000002)
+# GCPATCH-NEXT:       DW_AT_type [DW_FORM_ref2] (cu + 0x{{[0-9a-f]+}} => {[[R2OFF:0x[0-9a-f]+]]}
+# GCPATCH:        [[R2OFF]]: DW_TAG_base_type
+# GCPATCH-NEXT:       DW_AT_name [DW_FORM_string] ("t_r2")
+
+# GCPATCH:          DW_TAG_subprogram
+# GCPATCH-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000003)
+# GCPATCH-NEXT:       DW_AT_type [DW_FORM_ref_udata] (cu + 0x{{[0-9a-f]+}} => {[[RUOFF:0x[0-9a-f]+]]}
+# GCPATCH:        [[RUOFF]]: DW_TAG_base_type
+# GCPATCH-NEXT:       DW_AT_name [DW_FORM_string] ("t_ru")

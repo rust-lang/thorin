@@ -1,0 +1,67 @@
+# Test that GC compacts the .debug_str_offsets.dwo table when string attributes
+# use DW_FORM_strx3 (DWARF5), by removing entries for strings only referenced
+# by dead DIEs, and that surviving DIEs' string attributes are correctly
+# remapped to the new indices.
+#
+# The .dwo has 4 string offset entries (indices 0-3). The dead subprogram
+# uses index 2 ("dead_func") and the live subprogram uses index 3
+# ("live_func"). After GC the dead entry at index 2 is removed, so the live
+# subprogram's string must be remapped from index 3 to index 2. Without the
+# DW_FORM_strx3 fix, the old index is copied verbatim and the string
+# resolves incorrectly.
+
+# Assemble the .dwo (split debug info).
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-compact-str-offsets-dwo.s -o %t.dwo
+
+# Generate the exec assembly with the .dwo path substituted in, then assemble it.
+# RUN: sed 's|DWO_PATH|%t.dwo|' %p/inputs/gc-compact-str-offsets-exec.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t.o
+
+# Baseline: all subprograms and strings survive when not garbage-collecting.
+# RUN: thorin -e %t.o -o %t-nogc.dwp
+# RUN: llvm-dwarfdump -debug-info -debug-str-offsets -debug-str %t-nogc.dwp | FileCheck --check-prefixes=CHECK,NOGC %s
+
+# With garbage collection the dead subprogram is removed and str_offsets compacted.
+# RUN: thorin --gc -e %t.o -o %t-gc.dwp
+# RUN: llvm-dwarfdump -debug-info -debug-str-offsets -debug-str %t-gc.dwp | FileCheck --check-prefixes=CHECK,GC %s
+
+# -- debug_info checks --
+# CHECK:        .debug_info.dwo contents:
+# CHECK:        DW_TAG_compile_unit
+# CHECK:          DW_AT_name	("test.c")
+# CHECK:          DW_AT_comp_dir	("/home")
+
+# Without GC, the dead subprogram comes first.
+# NOGC:          DW_TAG_subprogram
+# NOGC:            DW_AT_name	("dead_func")
+
+# The live subprogram must always be present with correct name.
+# CHECK:          DW_TAG_subprogram
+# CHECK:            DW_AT_name	("live_func")
+
+# After GC there must be no further subprograms.
+# GC:          NULL
+# GC-NOT:      DW_TAG_subprogram
+
+# -- debug_str checks (appears before str_offsets in output) --
+# After GC the dead string should not be in .debug_str.dwo.
+# GC:          .debug_str.dwo contents:
+# GC:          "test.c"
+# GC:          "live_func"
+# GC-NOT:      "dead_func"
+
+# -- str_offsets checks --
+# CHECK:        .debug_str_offsets.dwo contents:
+
+# Without GC the table has 4 entries (contribution size = 4 header + 4*4 = 20).
+# NOGC:        Contribution size = 20
+# NOGC:        "test.c"
+# NOGC:        "/home"
+# NOGC:        "dead_func"
+# NOGC:        "live_func"
+
+# After GC the table has 3 entries (contribution size = 4 header + 3*4 = 16).
+# GC:          Contribution size = 16
+# GC:          "test.c"
+# GC:          "/home"
+# GC:          "live_func"
+# GC-NOT:      "dead_func"

@@ -1,0 +1,51 @@
+# Test that the presence of a type unit in .debug_info.dwo disables
+# compaction of .debug_rnglists.dwo, .debug_loclists.dwo, and
+# .debug_str_offsets.dwo offset tables, since the type unit shares
+# those sections with the compilation unit.
+#
+# Dead DIEs should still be removed from .debug_info.dwo.
+
+# Assemble the .dwo (split debug info).
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-type-unit-no-compact-dwo.s -o %t.dwo
+
+# Generate the exec assembly with the .dwo path substituted in, then assemble it.
+# RUN: sed 's|DWO_PATH|%t.dwo|' %p/inputs/gc-type-unit-no-compact-exec.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t.o
+
+# With garbage collection the dead subprogram is removed but offset tables are NOT compacted.
+# RUN: thorin --gc -e %t.o -o %t-gc.dwp
+# RUN: llvm-dwarfdump -debug-info -debug-str-offsets -debug-str -debug-rnglists -debug-loclists %t-gc.dwp | FileCheck %s
+
+# -- debug_info checks: dead DIE is still removed --
+# CHECK:        .debug_info.dwo contents:
+# CHECK:        DW_TAG_compile_unit
+# CHECK:          DW_AT_name	("test.c")
+# CHECK:          DW_AT_comp_dir	("/home")
+# CHECK:          DW_TAG_subprogram
+# CHECK:            DW_AT_name	("live_func")
+# CHECK:          NULL
+# CHECK-NOT:    DW_TAG_subprogram
+
+# -- loclists: offset table is NOT compacted (still 2 entries) --
+# CHECK:        .debug_loclists.dwo contents:
+# CHECK:        offset_entry_count = 0x00000002
+# CHECK:        offsets: [
+# CHECK:        0x{{[0-9a-f]+}}
+# CHECK-NEXT:   0x{{[0-9a-f]+}}
+# CHECK-NEXT:   ]
+
+# -- rnglists: offset table is NOT compacted (still 2 entries) --
+# CHECK:        .debug_rnglists.dwo contents:
+# CHECK:        offset_entry_count = 0x00000002
+# CHECK:        offsets: [
+# CHECK:        0x{{[0-9a-f]+}}
+# CHECK-NEXT:   0x{{[0-9a-f]+}}
+# CHECK-NEXT:   ]
+
+# -- str_offsets: table is NOT compacted (still 5 entries, contribution size = 4 header + 5*4 = 24) --
+# CHECK:        .debug_str_offsets.dwo contents:
+# CHECK:        Contribution size = 24
+# CHECK:        "test.c"
+# CHECK:        "/home"
+# CHECK:        "live_func"
+# CHECK:        "dead_func"
+# CHECK:        "int"

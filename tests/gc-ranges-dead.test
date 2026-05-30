@@ -1,0 +1,53 @@
+# Test that a DW_TAG_subprogram whose DW_AT_ranges points to a range list
+# where every entry is tombstoned is correctly identified as dead and removed
+# by GC.
+
+# Assemble the .dwo (split debug info).
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-ranges-dead-dwo.s -o %t.dwo
+
+# Generate the exec assembly with the .dwo path substituted in, then assemble it.
+# RUN: sed 's|DWO_PATH|%t.dwo|' %p/inputs/gc-ranges-dead-exec.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t.o
+
+# Baseline: all DIEs survive when not garbage-collecting.
+# RUN: thorin -e %t.o -o %t-nogc.dwp
+# RUN: llvm-dwarfdump -v %t-nogc.dwp | FileCheck --check-prefixes=CHECK,NOGC %s
+
+# With garbage collection the dead subprogram should be removed.
+# RUN: thorin --gc -e %t.o -o %t-gc.dwp
+# RUN: llvm-dwarfdump -v %t-gc.dwp | FileCheck --check-prefixes=CHECK,GC %s
+
+# CHECK:        .debug_info.dwo contents:
+# CHECK:        DW_TAG_compile_unit
+
+# dead_func (all ranges tombstoned via startx_length) -- dead, removed by GC.
+# NOGC:          DW_TAG_subprogram
+# NOGC:            DW_AT_ranges [DW_FORM_rnglistx]
+# NOGC:            DW_AT_name [DW_FORM_string] ("dead_func")
+
+# dead_base_func (base_addressx tombstoned + offset_pair) -- dead, removed by GC.
+# NOGC:          DW_TAG_subprogram
+# NOGC:            DW_AT_ranges [DW_FORM_rnglistx]
+# NOGC:            DW_AT_name [DW_FORM_string] ("dead_base_func")
+
+# After GC, dead_func and dead_base_func must not appear. The GC-NOT region
+# spans from compile_unit to the next GC/CHECK positive match (mixed_func's
+# name below), so no CHECK lines for mixed_func's tag can appear before this.
+# GC-NOT:        "dead_func"
+# GC-NOT:        "dead_base_func"
+
+# mixed_func (one tombstoned + one live range entry) -- survives GC.
+# Use separate NOGC/GC checks so the shared CHECK lines don't truncate the
+# GC-NOT region above.
+# NOGC:          DW_TAG_subprogram
+# NOGC:            DW_AT_ranges [DW_FORM_rnglistx]
+# NOGC:            DW_AT_name [DW_FORM_string] ("mixed_func")
+# GC:            DW_AT_name [DW_FORM_string] ("mixed_func")
+
+# live_func (DW_AT_low_pc, live) -- always present.
+# CHECK:          DW_TAG_subprogram
+# CHECK:            DW_AT_low_pc [DW_FORM_addrx] (indexed (00000001)
+# CHECK:            DW_AT_name [DW_FORM_string] ("live_func")
+
+# After garbage collection there must be no further subprograms.
+# GC:        NULL
+# GC-NOT:    DW_TAG_subprogram
