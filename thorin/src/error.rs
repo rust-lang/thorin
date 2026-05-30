@@ -102,6 +102,14 @@ pub enum Error {
     NoOutputObjectCreated,
     /// Input objects have different encodings.
     MixedInputEncodings,
+    /// A DW_LLE value was unrecognized.
+    UnsupportedLocListsEntry(u8),
+    /// `.debug_info.dwo` compilation unit is malformed or truncated during GC.
+    MalformedDebugInfo,
+    /// An abbreviation form encountered during GC byte-level rewriting is not supported.
+    UnsupportedForm(u16),
+    /// A section-absolute reference was found where not expected.
+    UnexpectedSectionAbsoluteReference,
 
     /// Catch-all for `std::io::Error`.
     Io(std::io::Error),
@@ -152,6 +160,10 @@ impl StdError for Error {
             Error::MissingReferencedUnit(_) => None,
             Error::NoOutputObjectCreated => None,
             Error::MixedInputEncodings => None,
+            Error::UnsupportedLocListsEntry(_) => None,
+            Error::MalformedDebugInfo => None,
+            Error::UnsupportedForm(_) => None,
+            Error::UnexpectedSectionAbsoluteReference => None,
             Error::Io(transparent) => StdError::source(transparent.as_dyn_error()),
             Error::ObjectRead(transparent) => StdError::source(transparent.as_dyn_error()),
             Error::ObjectWrite(transparent) => StdError::source(transparent.as_dyn_error()),
@@ -250,6 +262,16 @@ impl fmt::Display for Error {
             }
             Error::NoOutputObjectCreated => write!(f, "No output object was created from inputs"),
             Error::MixedInputEncodings => write!(f, "Input objects haved mixed encodings"),
+            Error::UnsupportedLocListsEntry(s) => {
+                write!(f, "Unsupported DW_LLE value: {}", s)
+            }
+            Error::MalformedDebugInfo => write!(f, "Malformed `.debug_info.dwo` compilation unit"),
+            Error::UnsupportedForm(form) => {
+                write!(f, "Unsupported DWARF form 0x{:02x} during GC rewrite", form)
+            }
+            Error::UnexpectedSectionAbsoluteReference => {
+                write!(f, "A section-absolute reference was found in a .dwo file")
+            }
             Error::Io(e) => fmt::Display::fmt(e, f),
             Error::ObjectRead(e) => fmt::Display::fmt(e, f),
             Error::ObjectWrite(e) => fmt::Display::fmt(e, f),

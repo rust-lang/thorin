@@ -1,0 +1,46 @@
+# Test that a DW_OP_convert that is the FIRST opcode of an exprloc (byte 0 of the
+# expression == 0xa8) is patched correctly after GC removes a dead subprogram and
+# shifts the referenced base_type to a smaller CU-relative offset.
+#
+# This exercises the ULEB128 operand patcher: the operand starts at byte 1 of the
+# expression, so its width must be measured from r.pos == 1, not from byte 0. Byte
+# 0 is the 0xa8 opcode, whose high (continuation) bit is set; measuring width from
+# byte 0 wrongly returns 2 and corrupts the rewritten expression.
+
+# Assemble the .dwo (split debug info).
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-convert-first-op-dwo.s -o %t.dwo
+
+# Generate the exec assembly with the .dwo path substituted in, then assemble it.
+# RUN: sed 's|DWO_PATH|%t.dwo|' %p/inputs/gc-convert-first-op-exec.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t.o
+
+# Baseline: all DIEs survive when not garbage-collecting.
+# RUN: thorin -e %t.o -o %t-nogc.dwp
+# RUN: llvm-dwarfdump -v %t-nogc.dwp | FileCheck --check-prefixes=CHECK,NOGC %s
+
+# With garbage collection the dead subprogram is removed and offsets shift.
+# RUN: thorin --gc -e %t.o -o %t-gc.dwp
+# RUN: llvm-dwarfdump -v %t-gc.dwp | FileCheck --check-prefixes=CHECK,GC %s
+
+# CHECK:        .debug_info.dwo contents:
+# CHECK:        DW_TAG_compile_unit
+
+# The dead subprogram (addrx 0, tombstoned) is present only in the baseline.
+# NOGC:          DW_TAG_subprogram
+# NOGC-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000000)
+
+# live_func (addrx 1, live) must always be present with its variable child.
+# CHECK:          DW_TAG_subprogram
+# CHECK-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000001)
+# CHECK:            DW_TAG_variable
+# CHECK-NEXT:         DW_AT_location [DW_FORM_exprloc] (DW_OP_convert (0x{{[0-9a-f]+}} -> {{0x[0-9a-f]+}}) "ct")
+
+# The base_type "ct" (conv_type) must survive, kept alive by DW_OP_convert, and
+# the DW_OP_convert operand above must resolve to its offset/name. With the bug
+# the operand is a corrupted 2-byte ULEB128 and dwarfdump decodes a wrong offset,
+# so the "ct" reference above fails to resolve.
+# CHECK:          DW_TAG_base_type
+# CHECK-NEXT:       DW_AT_name [DW_FORM_string] ("ct")
+
+# After GC there must be no extra subprograms.
+# GC:        NULL
+# GC-NOT:    DW_TAG_subprogram

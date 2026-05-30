@@ -4,3 +4,6 @@ members = [
     "thorin",
     "thorin-bin"
 ]
+
+[patch.crates-io]
+gimli = { git = "https://github.com/gimli-rs/gimli", rev = "1bb1457480938ea412c7b2a99e07534e7846d1df" }

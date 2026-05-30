@@ -4,10 +4,12 @@ use std::{
     borrow::Cow,
     collections::HashSet,
     fmt,
+    ops::Deref,
     path::{Path, PathBuf},
 };
 
-use gimli::{EndianSlice, Reader};
+use gimli::{EndianSlice, Reader, ReaderOffset, UnitType};
+use hashbrown::HashMap;
 use object::{write::Object as WritableObject, FileKind, Object, ObjectSection};
 use tracing::{debug, trace};
 
@@ -15,18 +17,20 @@ use crate::{
     error::Result,
     ext::EndianityExt,
     index::Bucketable,
-    package::{dwo_identifier_of_unit, DwarfObject, InProgressDwarfPackage},
+    package::{dwo_identifier_of_unit, DwarfObject, InProgressDwarfPackage, SessionHolder},
     relocate::{add_relocations, Relocate, RelocationMap},
 };
 
 mod error;
 mod ext;
+pub(crate) mod gc;
 mod index;
 mod package;
 mod relocate;
 mod strings;
 
 pub use crate::error::Error;
+pub use crate::package::DwoId;
 
 /// `Session` is expected to be implemented by users of `thorin`, allowing users of `thorin` to
 /// decide how to manage data, rather than `thorin` having arenas internally.
@@ -54,6 +58,96 @@ pub trait Session<Relocations> {
 
     /// Returns a reference to contents of file at `path` with lifetime `'session`.
     fn read_input<'session>(&'session self, path: &Path) -> std::io::Result<&'session [u8]>;
+
+    type DataHolder<T>: Deref<Target = T> + From<T> + Clone;
+}
+
+struct ExecutableData<'session, Relocations, Sess: Session<Relocations>>(
+    Sess::DataHolder<
+        gimli::Dwarf<Relocate<'session, gimli::EndianSlice<'session, gimli::RunTimeEndian>>>,
+    >,
+);
+
+struct DwoData {
+    addr_size: u8,
+    addr_base: gimli::DebugAddrBase<usize>,
+}
+
+struct GarbageCollectionData<'session, Relocations, Sess>
+where
+    Sess: Session<Relocations>,
+{
+    executable_data: HashMap<PathBuf, ExecutableData<'session, Relocations, Sess>>,
+    dwo_data: HashMap<DwoId, (PathBuf, DwoData)>,
+}
+
+impl<'session, Relocations, Sess> Default for GarbageCollectionData<'session, Relocations, Sess>
+where
+    Sess: Session<Relocations>,
+{
+    fn default() -> Self {
+        Self { executable_data: Default::default(), dwo_data: Default::default() }
+    }
+}
+
+impl<'session, Relocations, Sess> GarbageCollectionData<'session, Relocations, Sess>
+where
+    Sess: Session<Relocations>,
+{
+    fn put_data_for_executable(
+        &mut self,
+        path: &Path,
+        data: ExecutableData<'session, Relocations, Sess>,
+    ) {
+        self.executable_data.insert(path.to_path_buf(), data);
+    }
+    fn put_data_for_dwo(&mut self, executable_path: &'_ Path, dwo_id: DwoId, data: DwoData) {
+        self.dwo_data.entry(dwo_id).insert((executable_path.to_path_buf(), data));
+    }
+    fn get_data_for_executable(
+        &self,
+        path: &'_ Path,
+    ) -> Option<&ExecutableData<'session, Relocations, Sess>> {
+        self.executable_data.get(path)
+    }
+    fn get_data_for_dwo(
+        &self,
+        dwo_id: DwoId,
+    ) -> Option<(&ExecutableData<'session, Relocations, Sess>, &DwoData)> {
+        let (ref executable_path, ref dwo_data) = self.dwo_data.get(&dwo_id)?;
+        let executable_data = self.executable_data.get(executable_path)?;
+        Some((executable_data, dwo_data))
+    }
+}
+
+fn dwarf_from_executable<'session>(
+    sess: &'session impl Session<RelocationMap>,
+    path: &'_ Path,
+) -> Result<gimli::Dwarf<Relocate<'session, gimli::EndianSlice<'session, gimli::RunTimeEndian>>>> {
+    let data = sess.read_input(path).map_err(Error::ReadInput)?;
+    let obj = object::File::parse(data).map_err(Error::ParseObjectFile)?;
+
+    let exec_endian = obj.endianness().as_runtime_endian();
+
+    let mut load_section = |id: gimli::SectionId| -> Result<_> {
+        let mut relocations = RelocationMap::default();
+        let data = match obj.section_by_name(&id.name()) {
+            Some(ref section) => {
+                add_relocations(&mut relocations, &obj, section)?;
+                section.compressed_data()?.decompress()?
+            }
+            // Use a non-zero capacity so that `ReaderOffsetId`s are unique.
+            None => Cow::Owned(Vec::with_capacity(1)),
+        };
+
+        let data_ref = sess.alloc_owned_cow(data);
+        let reader = EndianSlice::new(data_ref, exec_endian);
+        let section = reader;
+        let relocations = sess.alloc_relocation(relocations);
+        Ok(Relocate { relocations, section, reader })
+    };
+
+    gimli::Dwarf::load(&mut load_section)
 }
 
 /// Should missing DWARF objects referenced by executables be skipped or result in an error?
@@ -84,6 +178,7 @@ impl MissingReferencedObjectBehaviour {
 /// `finish`.
 pub struct DwarfPackage<'output, 'session: 'output, Sess: Session<RelocationMap>> {
     sess: &'session Sess,
+    gc_data: Option<GarbageCollectionData<'session, RelocationMap, Sess>>,
     maybe_in_progress: Option<InProgressDwarfPackage<'output>>,
     targets: HashSet<DwarfObject>,
 }
@@ -106,7 +201,7 @@ where
 {
     /// Create a new `DwarfPackage` with the provided `Session` implementation.
     pub fn new(sess: &'session Sess) -> Self {
-        Self { sess, maybe_in_progress: None, targets: HashSet::new() }
+        Self { sess, gc_data: None, maybe_in_progress: None, targets: HashSet::new() }
     }
 
     /// Add an input object to the in-progress package.
@@ -133,50 +228,30 @@ where
         };
 
         let sess = self.sess;
-        self.maybe_in_progress
-            .as_mut()
-            .expect("`process_input_object` is broken")
-            .add_input_object(sess, obj, encoding)
+        self.maybe_in_progress.as_mut().expect("`process_input_object` is broken").add_input_object(
+            SessionHolder::SimpleSession(sess),
+            obj,
+            encoding,
+        )
     }
 
-    /// Add input objects referenced by executable to the DWARF package.
-    #[tracing::instrument(level = "trace")]
-    pub fn add_executable(
+    /// Calls F with the path of each dwo in the executable.
+    fn iterate_executable_dwo<F>(
         &mut self,
-        path: &Path,
-        missing_behaviour: MissingReferencedObjectBehaviour,
-    ) -> Result<()> {
-        let data = self.sess.read_input(path).map_err(Error::ReadInput)?;
-        let obj = object::File::parse(data).map_err(Error::ParseObjectFile)?;
-
-        let mut load_section = |id: gimli::SectionId| -> Result<_> {
-            let mut relocations = RelocationMap::default();
-            let data = match obj.section_by_name(&id.name()) {
-                Some(ref section) => {
-                    add_relocations(&mut relocations, &obj, section)?;
-                    section.compressed_data()?.decompress()?
-                }
-                // Use a non-zero capacity so that `ReaderOffsetId`s are unique.
-                None => Cow::Owned(Vec::with_capacity(1)),
-            };
-
-            let data_ref = self.sess.alloc_owned_cow(data);
-            let reader = EndianSlice::new(data_ref, obj.endianness().as_runtime_endian());
-            let section = reader;
-            let relocations = self.sess.alloc_relocation(relocations);
-            Ok(Relocate { relocations, section, reader })
-        };
-
-        let dwarf = gimli::Dwarf::load(&mut load_section)?;
-
+        dwarf: &gimli::Dwarf<Relocate<gimli::EndianSlice<gimli::RunTimeEndian>>>,
+        mut f: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&mut Self, &Path) -> Result<()>,
+    {
         let mut iter = dwarf.units();
         while let Some(header) = iter.next().map_err(Error::ParseUnitHeader)? {
-            let unit = dwarf.unit(header).map_err(Error::ParseUnit)?;
+            let unit = dwarf.unit(header.clone()).map_err(Error::ParseUnit)?;
 
             let target = match dwo_identifier_of_unit(&dwarf.debug_abbrev, &unit.header)? {
                 Some(target) => target,
                 None => {
-                    debug!("no target");
+                    debug!("no target {:?}", header.offset());
                     continue;
                 }
             };
@@ -225,21 +300,31 @@ where
                 self.targets.insert(target);
             }
 
-            match self.add_input_object(&path) {
-                Ok(()) => (),
-                Err(Error::ReadInput(..)) if missing_behaviour.skip_missing() => (),
-                Err(e) => return Err(e),
-            }
+            f(self, &path)?;
         }
 
         Ok(())
     }
 
-    /// Add an input object to the DWARF package.
-    ///
-    /// Input object must be an archive or an elf object.
+    /// Add input objects referenced by executable to the DWARF package.
     #[tracing::instrument(level = "trace")]
-    pub fn add_input_object(&mut self, path: &Path) -> Result<()> {
+    pub fn add_executable(
+        &mut self,
+        path: &Path,
+        missing_behaviour: MissingReferencedObjectBehaviour,
+    ) -> Result<()> {
+        let dwarf = dwarf_from_executable(self.sess, path)?;
+        self.iterate_executable_dwo(&dwarf, |this, path| match this.add_input_object(path) {
+            Ok(()) => Ok(()),
+            Err(Error::ReadInput(..)) if missing_behaviour.skip_missing() => Ok(()),
+            Err(e) => Err(e),
+        })
+    }
+
+    fn iterate_object<F>(&mut self, path: &'_ Path, mut f: F) -> Result<()>
+    where
+        F: FnMut(&mut Self, &object::File) -> Result<()>,
+    {
         let data = self.sess.read_input(&path).map_err(Error::ReadInput)?;
 
         let kind = FileKind::parse(data).map_err(Error::ParseFileKind)?;
@@ -264,7 +349,7 @@ where
                     match kind {
                         FileKind::Elf32 | FileKind::Elf64 => {
                             let obj = object::File::parse(data).map_err(Error::ParseObjectFile)?;
-                            self.process_input_object(&obj)?;
+                            f(self, &obj)?;
                         }
                         _ => {
                             trace!("skipping non-elf archive member");
@@ -276,10 +361,18 @@ where
             }
             FileKind::Elf32 | FileKind::Elf64 => {
                 let obj = object::File::parse(data).map_err(Error::ParseObjectFile)?;
-                self.process_input_object(&obj)
+                f(self, &obj)
             }
             _ => Err(Error::InvalidInputKind),
         }
+    }
+
+    /// Add an input object to the DWARF package.
+    ///
+    /// Input object must be an archive or an elf object.
+    #[tracing::instrument(level = "trace")]
+    pub fn add_input_object(&mut self, path: &Path) -> Result<()> {
+        self.iterate_object(path, |this, obj| this.process_input_object(obj))
     }
 
     /// Returns the `object::write::Object` containing the created DWARF package.
@@ -308,5 +401,154 @@ where
             }
             None => Err(Error::NoOutputObjectCreated),
         }
+    }
+
+    #[tracing::instrument(level = "trace")]
+    pub fn preprocess_gc_executable(&mut self, path: &Path) -> Result<()> {
+        let dwarf = Sess::DataHolder::from(dwarf_from_executable(self.sess, path)?);
+        let gc_data = self.gc_data.get_or_insert_default();
+        gc_data.put_data_for_executable(path, ExecutableData(dwarf.clone()));
+
+        let mut iter = dwarf.units();
+        while let Some(header) = iter.next().map_err(Error::ParseUnitHeader)? {
+            let unit = dwarf.unit(header.clone()).map_err(Error::ParseUnit)?;
+
+            let target = match dwo_identifier_of_unit(&dwarf.debug_abbrev, &unit.header)? {
+                Some(DwarfObject::Compilation(dwo_id)) => dwo_id,
+                Some(_) => continue,
+                None => {
+                    debug!("no target 2");
+                    continue;
+                }
+            };
+
+            match header.type_() {
+                UnitType::Skeleton(_) => {
+                    // DWARF5: addr_base is in DW_AT_addr_base.
+                    let mut cursor = unit.header.entries(&unit.abbreviations);
+                    cursor.next_dfs()?;
+                    if let Some(root) = cursor.current() {
+                        if let Some(gimli::AttributeValue::DebugAddrBase(base)) =
+                            root.attr_value(gimli::DW_AT_addr_base)
+                        {
+                            let addr_base = base.0.into_u64();
+                            let addr_size = header.address_size();
+                            trace!(
+                                ?target,
+                                addr_size,
+                                addr_base,
+                                "found addr_base for DWARF5 skeleton CU"
+                            );
+                            gc_data.put_data_for_dwo(
+                                path,
+                                target,
+                                DwoData {
+                                    addr_size,
+                                    addr_base: gimli::DebugAddrBase(addr_base as usize),
+                                },
+                            );
+                        }
+                    }
+                }
+                UnitType::Compilation => {
+                    // DWARF4 GNU extension: skeleton units have DW_AT_GNU_dwo_id and
+                    // DW_AT_GNU_addr_base. If no addr base is present, default to 0.
+                    let mut cursor = unit.header.entries(&unit.abbreviations);
+                    cursor.next_dfs()?;
+                    if let Some(root) = cursor.current() {
+                        // Check for DW_AT_GNU_dwo_id to identify skeleton units.
+                        if let Some(gimli::AttributeValue::DwoId(_)) =
+                            root.attr_value(gimli::constants::DW_AT_GNU_dwo_id)
+                        {
+                            // DW_AT_GNU_addr_base defaults to 0 if absent.
+                            let addr_base = root
+                                .attr_value(gimli::constants::DW_AT_GNU_addr_base)
+                                .and_then(|v| {
+                                    let gimli::AttributeValue::DebugAddrBase(base) = v else {
+                                        return None;
+                                    };
+                                    Some(base.0.into_u64())
+                                })
+                                .unwrap_or_default();
+                            let addr_size = header.address_size();
+                            trace!(
+                                ?target,
+                                addr_base,
+                                addr_size,
+                                "found addr_base for DWARF4 GNU skeleton CU"
+                            );
+                            gc_data.put_data_for_dwo(
+                                path,
+                                target,
+                                DwoData {
+                                    addr_size,
+                                    addr_base: gimli::DebugAddrBase(addr_base as usize),
+                                },
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Add an input object to the in-progress package with GC.
+    #[tracing::instrument(level = "trace", skip(obj))]
+    fn process_gc_input_object<'input>(&mut self, obj: &'input object::File<'input>) -> Result<()> {
+        if self.maybe_in_progress.is_none() {
+            self.maybe_in_progress =
+                Some(InProgressDwarfPackage::new(obj.architecture(), obj.endianness()));
+        }
+
+        let encoding = if let Some(section) = obj.section_by_name(".debug_info.dwo") {
+            let data = section.compressed_data()?.decompress()?;
+            let data_ref = self.sess.alloc_owned_cow(data);
+            let debug_info = gimli::DebugInfo::new(data_ref, obj.endianness().as_runtime_endian());
+            debug_info
+                .units()
+                .next()
+                .map_err(Error::ParseUnitHeader)?
+                .map(|root_header| root_header.encoding())
+                .ok_or(Error::NoCompilationUnits)?
+        } else {
+            debug!("no `.debug_info.dwo` in input dwarf object");
+            return Ok(());
+        };
+
+        let sess = self.sess;
+        let gc_data = self.gc_data.as_ref().unwrap();
+        self.maybe_in_progress.as_mut().expect("`process_input_object` is broken").add_input_object(
+            SessionHolder::new_gc(sess, gc_data),
+            obj,
+            encoding,
+        )
+    }
+
+    /// Add an input object to the DWARF package with GC.
+    ///
+    /// Input object must be an archive or an elf object.
+    #[tracing::instrument(level = "trace")]
+    pub fn add_gc_input_object(&mut self, path: &Path) -> Result<()> {
+        self.iterate_object(path, |this, obj| this.process_gc_input_object(obj))
+    }
+
+    #[tracing::instrument(level = "trace")]
+    pub fn add_gc_executable(
+        &mut self,
+        path: &Path,
+        missing_behaviour: MissingReferencedObjectBehaviour,
+    ) -> Result<()> {
+        let dwarf = self.gc_data.as_ref().unwrap().get_data_for_executable(path)
+            .expect("All executables passed to add_gc_executable() must have preprocess_gc_executable() called first.")
+            .0
+            .clone();
+        self.iterate_executable_dwo(&dwarf, |this, path| match this.add_gc_input_object(path) {
+            Ok(()) => Ok(()),
+            Err(Error::ReadInput(..)) if missing_behaviour.skip_missing() => Ok(()),
+            Err(e) => Err(e),
+        })
     }
 }

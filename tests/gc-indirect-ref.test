@@ -1,0 +1,37 @@
+# Test that a reference attribute encoded via DW_FORM_indirect (which embeds the
+# actual form as a ULEB128 prefix in the DIE stream) is correctly traced as a
+# liveness edge and patched after GC.
+
+# Assemble the .dwo (split debug info).
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-indirect-ref-dwo.s -o %t.dwo
+
+# Generate the exec assembly with the .dwo path substituted in, then assemble it.
+# RUN: sed 's|DWO_PATH|%t.dwo|' %p/inputs/gc-indirect-ref-exec.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t.o
+
+# Baseline: all DIEs survive when not garbage-collecting.
+# RUN: thorin -e %t.o -o %t-nogc.dwp
+# RUN: llvm-dwarfdump -v %t-nogc.dwp | FileCheck --check-prefixes=CHECK,NOGC %s
+
+# With garbage collection the dead subprogram is removed.
+# RUN: thorin --gc -e %t.o -o %t-gc.dwp
+# RUN: llvm-dwarfdump -v %t-gc.dwp | FileCheck --check-prefixes=CHECK,GC %s
+
+# CHECK:        .debug_info.dwo contents:
+# CHECK:        DW_TAG_compile_unit
+
+# The dead subprogram (addrx 0, tombstoned) is present only in the baseline.
+# NOGC:        DW_TAG_subprogram
+# NOGC-NEXT:     DW_AT_low_pc [DW_FORM_addrx] (indexed (00000000)
+
+# The live subprogram (addrx 1) must always be present.
+# llvm-dwarfdump resolves DW_FORM_indirect transparently, showing the inner form.
+# CHECK:          DW_TAG_subprogram
+# CHECK-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000001)
+# CHECK-NEXT:       DW_AT_type [DW_FORM_ref4] (cu + 0x{{[0-9a-f]+}} => {[[BTOFF:0x[0-9a-f]+]]}
+
+# The base_type must survive at the offset referenced by DW_AT_type.
+# CHECK:        [[BTOFF]]: DW_TAG_base_type
+
+# After garbage collection there must be no second subprogram.
+# GC:        NULL
+# GC-NOT:    DW_TAG_subprogram

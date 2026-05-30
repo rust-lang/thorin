@@ -1,0 +1,51 @@
+# Test that DW_OP_call2 and DW_OP_GNU_parameter_ref inside exprloc attributes
+# keep their target DIEs alive (even though those DIEs have tombstoned low_pc)
+# and that the expression operands are patched to the correct new CU-relative
+# offsets after GC removes a dead DIE.
+
+# Assemble the .dwo (split debug info).
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-expr-ops-dwo.s -o %t.dwo
+
+# Generate the exec assembly with the .dwo path substituted in, then assemble it.
+# RUN: sed 's|DWO_PATH|%t.dwo|' %p/inputs/gc-expr-ops-exec.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t.o
+
+# Baseline: all DIEs survive when not garbage-collecting.
+# RUN: thorin -e %t.o -o %t-nogc.dwp
+# RUN: llvm-dwarfdump -v %t-nogc.dwp | FileCheck --check-prefixes=CHECK,NOGC %s
+
+# With garbage collection the dead subprogram is removed.
+# RUN: thorin --gc -e %t.o -o %t-gc.dwp
+# RUN: llvm-dwarfdump -v %t-gc.dwp | FileCheck --check-prefixes=CHECK,GC %s
+
+# CHECK:        .debug_info.dwo contents:
+# CHECK:        DW_TAG_compile_unit
+
+# The dead subprogram (addrx 0, tombstoned) is present only in the baseline.
+# NOGC:          DW_TAG_subprogram
+# NOGC-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000000)
+
+# The caller subprogram (addrx 1, live) must always be present with DW_OP_call2.
+# CHECK:          DW_TAG_subprogram
+# CHECK-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000001)
+# CHECK-NEXT:       DW_AT_frame_base [DW_FORM_exprloc] (DW_OP_call2 0x{{[0-9a-f]+}})
+
+# The callee subprogram (addrx 2, tombstoned but kept alive by DW_OP_call2).
+# CHECK:          DW_TAG_subprogram
+# CHECK-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000002)
+
+# The paramfn subprogram (addrx 3, live, has children).
+# CHECK:          DW_TAG_subprogram
+# CHECK-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000003)
+
+# The formal_parameter with DW_OP_GNU_parameter_ref (0xfa).
+# llvm-dwarfdump does not decode this GNU extension; it appears as raw bytes.
+# CHECK:            DW_TAG_formal_parameter
+# CHECK-NEXT:         DW_AT_location [DW_FORM_exprloc] ({{.*}}fa
+
+# The paramtgt subprogram (addrx 4, tombstoned but kept alive by DW_OP_GNU_parameter_ref).
+# CHECK:          DW_TAG_subprogram
+# CHECK-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000004)
+
+# After GC only the compile_unit NULL terminator follows paramtgt.
+# GC:        NULL
+# GC-NOT:    DW_TAG_subprogram

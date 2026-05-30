@@ -1,0 +1,50 @@
+# Test that GC correctly handles DW_TAG_variable DIEs as roots based on their
+# DW_AT_location exprloc containing DW_OP_addrx: a variable whose address
+# resolves to a non-tombstoned value is live, while one whose address is
+# tombstoned is dead.  The live variable's DW_AT_type ref4 keeps the
+# base_type alive, and the ref4 is patched correctly after GC.
+
+# Assemble the .dwo (split debug info).
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-variable-root-dwo.s -o %t.dwo
+
+# Generate the exec assembly with the .dwo path substituted in, then assemble it.
+# RUN: sed 's|DWO_PATH|%t.dwo|' %p/inputs/gc-variable-root-exec.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t.o
+
+# Baseline: everything survives when not garbage-collecting.
+# RUN: thorin -e %t.o -o %t-nogc.dwp
+# RUN: llvm-dwarfdump -v %t-nogc.dwp | FileCheck --check-prefixes=CHECK,NOGC %s
+
+# With garbage collection the dead subprogram and dead variable are removed.
+# RUN: thorin --gc -e %t.o -o %t-gc.dwp
+# RUN: llvm-dwarfdump -v %t-gc.dwp | FileCheck --check-prefixes=CHECK,GC %s
+
+# CHECK:        .debug_info.dwo contents:
+# CHECK:        DW_TAG_compile_unit
+
+# The dead subprogram (addrx 0, tombstoned) is present only in the baseline.
+# NOGC:          DW_TAG_subprogram
+# NOGC-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000000)
+
+# After GC, the dead subprogram must not appear before the live variable.
+# GC-NOT:        DW_TAG_subprogram
+
+# The live variable (DW_OP_addrx 1, non-tombstoned) must always be present.
+# CHECK:          DW_TAG_variable
+# CHECK-NEXT:       DW_AT_name [DW_FORM_string] ("live_var")
+# CHECK-NEXT:       DW_AT_location [DW_FORM_exprloc]
+# CHECK-NEXT:       DW_AT_type [DW_FORM_ref4] (cu + 0x{{[0-9a-f]+}} => {[[BTOFF:0x[0-9a-f]+]]}
+
+# The dead variable (DW_OP_addrx 2, tombstoned) is present only in the baseline.
+# NOGC:          DW_TAG_variable
+# NOGC-NEXT:       DW_AT_name [DW_FORM_string] ("dead_var")
+
+# After GC, the dead variable must not appear before the base_type.
+# GC-NOT:        "dead_var"
+
+# The base_type must survive at the offset referenced by live_var's DW_AT_type.
+# CHECK:        [[BTOFF]]: DW_TAG_base_type
+
+# After garbage collection there must be no extra subprograms or variables.
+# GC:        NULL
+# GC-NOT:    DW_TAG_subprogram
+# GC-NOT:    DW_TAG_variable

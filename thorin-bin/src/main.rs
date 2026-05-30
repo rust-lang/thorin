@@ -4,6 +4,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 use anyhow::{Context, Result};
@@ -42,6 +43,9 @@ struct Cli {
     /// Specify path to write the dwarf package to [default: -]
     #[arg(short, long = "output")]
     output: Option<PathBuf>,
+    /// Garbage collect
+    #[arg(long = "gc")]
+    gc: bool,
 }
 
 /// Implementation of `thorin::Session` using `typed_arena` and `memmap2`.
@@ -72,6 +76,8 @@ impl<Relocations> thorin::Session<Relocations> for Session<Relocations> {
         let mmap = (unsafe { Mmap::map(&file) })?;
         Ok(self.alloc_mmap(mmap))
     }
+
+    type DataHolder<T> = Rc<T>;
 }
 
 /// Returns `true` if the file type is a fifo.
@@ -150,19 +156,39 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    if args.gc {
+        for executable in &args.executables {
+            package
+                .preprocess_gc_executable(executable)
+                .with_context(|| Error::AddExecutable(executable.display().to_string()))?;
+        }
+    }
+
     for input in &args.inputs {
-        package
-            .add_input_object(input)
-            .with_context(|| Error::AddInputObject(input.display().to_string()))?;
+        if args.gc {
+            package
+                .add_gc_input_object(input)
+                .with_context(|| Error::AddInputObject(input.display().to_string()))?;
+        } else {
+            package
+                .add_input_object(input)
+                .with_context(|| Error::AddInputObject(input.display().to_string()))?;
+        }
     }
 
     for executable in &args.executables {
         // Failing to read the referenced object might be expected if the path referenced by
         // the executable isn't found but the referenced DWARF object is later found as an
         // input - calling `finish` will return an error in this case.
-        package
-            .add_executable(executable, thorin::MissingReferencedObjectBehaviour::Skip)
-            .with_context(|| Error::AddExecutable(executable.display().to_string()))?;
+        if args.gc {
+            package
+                .add_gc_executable(executable, thorin::MissingReferencedObjectBehaviour::Skip)
+                .with_context(|| Error::AddExecutable(executable.display().to_string()))?;
+        } else {
+            package
+                .add_executable(executable, thorin::MissingReferencedObjectBehaviour::Skip)
+                .with_context(|| Error::AddExecutable(executable.display().to_string()))?;
+        }
     }
 
     let output = args.output.unwrap_or_else(|| {

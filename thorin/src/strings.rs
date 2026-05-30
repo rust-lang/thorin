@@ -4,6 +4,7 @@ use gimli::{
     Section,
 };
 use hashbrown::HashMap;
+use itertools::Either;
 use tracing::debug;
 
 use crate::{
@@ -56,15 +57,18 @@ impl PackageStringTable {
     }
 
     /// Adds strings from input `.debug_str_offsets` and `.debug_str` into the string table, returns
-    /// data for a equivalent `.debug_str_offsets` section with offsets pointing into the new
+    /// data for an equivalent `.debug_str_offsets` section with offsets pointing into the new
     /// `.debug_str` section.
+    ///
+    /// When `filter` is `Some`, only entries whose index is in the set are included, producing a
+    /// compacted offset table. The caller must have already remapped strx values in `.debug_info`.
     pub(crate) fn remap_str_offsets_section<E: gimli::Endianity>(
         &mut self,
         debug_str: gimli::DebugStr<EndianSlice<E>>,
         debug_str_offsets: gimli::DebugStrOffsets<EndianSlice<E>>,
-        section_size: u64,
         endian: E,
         encoding: Encoding,
+        filter: Option<&std::collections::BTreeSet<u64>>,
     ) -> Result<EndianVec<E>> {
         let entry_size = match encoding.format {
             Format::Dwarf32 => 4,
@@ -80,22 +84,22 @@ impl PackageStringTable {
         let base: gimli::DebugStrOffsetsBase<usize> =
             DebugStrOffsetsBase::default_for_encoding_and_file(encoding, DwarfFileType::Dwo);
 
+        let num_elements = (debug_str_offsets.reader().len() - base.0) as u64 / entry_size;
+        let output_count =
+            filter.map_or(num_elements, |set| set.range(..num_elements).count() as u64);
+
         if encoding.is_std_dwarf_package_format() {
+            // Unit length = version (2) + padding (2) + entries.
+            let payload = 4 + output_count * entry_size;
             match encoding.format {
                 Format::Dwarf32 => {
-                    // Unit length (4 bytes): size of the offsets section without this
-                    // header (8 bytes total).
                     data.write_u32(
-                        (section_size - 8)
-                            .try_into()
-                            .expect("section size w/out header larger than u32"),
+                        payload.try_into().expect("section size w/out header larger than u32"),
                     )?;
                 }
                 Format::Dwarf64 => {
-                    // Unit length (4 bytes then 8 bytes): size of the offsets section without
-                    // this header (16 bytes total).
                     data.write_u32(u32::MAX)?;
-                    data.write_u64(section_size - 16)?;
+                    data.write_u64(payload)?;
                 }
             };
             // Version (2 bytes): DWARF 5
@@ -105,11 +109,10 @@ impl PackageStringTable {
         }
         debug!(?base);
 
-        let base_offset: u64 = base.0.try_into().expect("base offset larger than u64");
-        let num_elements = (section_size - base_offset) / entry_size;
-        debug!(?section_size, ?base_offset, ?num_elements);
-
-        for i in 0..num_elements {
+        let indices = filter.map_or(Either::Right(0..num_elements), |set| {
+            Either::Left(set.range(..num_elements).copied())
+        });
+        for i in indices {
             let dwo_index = DebugStrOffsetsIndex(i as usize);
             let dwo_offset = debug_str_offsets
                 .get_str_offset(encoding.format, base, dwo_index)

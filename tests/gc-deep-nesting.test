@@ -1,0 +1,64 @@
+# Test that GC handles multi-level DIE nesting deeper than compile_unit > namespace > subprogram.
+# Two patterns are tested:
+#   1. compile_unit > structure_type > subprogram (class with member functions)
+#   2. compile_unit > subprogram > subprogram (nested/local function)
+# In both cases the parent is Retained (tombstoned but ancestor of a live child),
+# the dead sibling subprogram is pruned, and the live one survives.
+
+# Assemble the .dwo (split debug info).
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-deep-nesting-dwo.s -o %t.dwo
+
+# Generate the exec assembly with the .dwo path substituted in, then assemble it.
+# RUN: sed 's|DWO_PATH|%t.dwo|' %p/inputs/gc-deep-nesting-exec.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t.o
+
+# Baseline: all DIEs survive when not garbage-collecting.
+# RUN: thorin -e %t.o -o %t-nogc.dwp
+# RUN: llvm-dwarfdump -v %t-nogc.dwp | FileCheck --check-prefixes=CHECK,NOGC %s
+
+# With garbage collection the dead subprograms are removed.
+# RUN: thorin --gc -e %t.o -o %t-gc.dwp
+# RUN: llvm-dwarfdump -v %t-gc.dwp | FileCheck --check-prefixes=CHECK,GC %s
+
+# CHECK:        .debug_info.dwo contents:
+# CHECK:        DW_TAG_compile_unit
+
+# --- Pattern 1: structure_type with member functions ---
+
+# The structure_type must always be present (retained as ancestor of live_method).
+# CHECK:          DW_TAG_structure_type
+# CHECK-NEXT:       DW_AT_name [DW_FORM_string] ("MyClass")
+
+# The dead method (addrx2 0, tombstoned) is present only in the baseline.
+# NOGC:            DW_TAG_subprogram
+# NOGC-NEXT:         DW_AT_low_pc [DW_FORM_addrx2] (indexed (00000000)
+# NOGC-NEXT:         DW_AT_name [DW_FORM_string] ("dead_method")
+
+# The live method (addrx2 1) must always be present.
+# CHECK:            DW_TAG_subprogram
+# CHECK-NEXT:         DW_AT_low_pc [DW_FORM_addrx2] (indexed (00000001)
+# CHECK-NEXT:         DW_AT_name [DW_FORM_string] ("live_method")
+
+# After GC, end of structure_type children — no more subprograms inside.
+# GC:            NULL
+# GC-NOT:        DW_TAG_subprogram
+
+# --- Pattern 2: subprogram containing nested subprograms ---
+
+# The outer subprogram must always be present (retained as ancestor of live_inner).
+# CHECK:          DW_TAG_subprogram
+# CHECK-NEXT:       DW_AT_low_pc [DW_FORM_addrx3] (indexed (00000002)
+# CHECK-NEXT:       DW_AT_name [DW_FORM_string] ("outer")
+
+# The dead inner subprogram (addrx2 3, tombstoned) is present only in the baseline.
+# NOGC:            DW_TAG_subprogram
+# NOGC-NEXT:         DW_AT_low_pc [DW_FORM_addrx2] (indexed (00000003)
+# NOGC-NEXT:         DW_AT_name [DW_FORM_string] ("dead_inner")
+
+# The live inner subprogram (addrx2 4) must always be present.
+# CHECK:            DW_TAG_subprogram
+# CHECK-NEXT:         DW_AT_low_pc [DW_FORM_addrx2] (indexed (00000004)
+# CHECK-NEXT:         DW_AT_name [DW_FORM_string] ("live_inner")
+
+# After GC, end of outer's children — no more subprograms inside.
+# GC:          NULL
+# GC-NOT:      DW_TAG_subprogram
