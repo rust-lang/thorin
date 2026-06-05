@@ -191,11 +191,13 @@ where
                     }
                 }
                 gimli::RawRngListEntry::OffsetPair { .. }
-                | gimli::RawRngListEntry::AddressOrOffsetPair { .. }
-                    if base_tombstoned =>
-                {
-                    any_removed = true;
-                    trace!(list_idx, "removing offset_pair under tombstoned base");
+                | gimli::RawRngListEntry::AddressOrOffsetPair { .. } => {
+                    if base_tombstoned {
+                        any_removed = true;
+                        trace!(list_idx, "removing offset_pair under tombstoned base");
+                    } else {
+                        entries.push(entry);
+                    }
                 }
                 gimli::RawRngListEntry::StartxEndx { begin, .. } => {
                     let tombstoned =
@@ -232,9 +234,6 @@ where
                     } else {
                         entries.push(entry);
                     }
-                }
-                _ => {
-                    entries.push(entry);
                 }
             }
         }
@@ -1748,18 +1747,14 @@ fn emit_attribute(
         let new = match patch.get(&old).copied() {
             Some(n) => n,
             None => {
-                // Target was dead. For DW_AT_sibling this can happen — fall through to sibling
-                // handling. For other references, the mark phase guarantees the target survives,
-                // so a missing entry indicates a cross-CU or unresolved reference; keep the
-                // original value.
+                // Target was dead. For DW_AT_sibling this can happen.
+                // Otherwise this should be impossible.
                 if name == DW_AT_sibling {
-                    // Find the next surviving sibling's new offset; if none, just keep old (the
-                    // consumer treats an out-of-range sibling as "no more siblings"). Simplest
-                    // correct behaviour: drop to old value — but old offsets are invalid after
-                    // rewrite. Use the new offset of the nearest surviving DIE at/after `old`.
-                    patch.range(old..).next().map_or(old, |(_, v)| *v)
+                    // Find the next surviving sibling's new offset. If None,
+                    // emit 0.
+                    patch.range(old..).next().map_or(gimli::UnitOffset(0), |(_, v)| *v)
                 } else {
-                    old
+                    unreachable!();
                 }
             }
         };
