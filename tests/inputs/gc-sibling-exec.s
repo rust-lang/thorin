@@ -3,10 +3,13 @@
 # Contains:
 #   .debug_info:   DWARF5 skeleton CU (DW_UT_skeleton) with DWO ID 0xdeadc0de,
 #                  DW_AT_addr_base, and DW_AT_dwo_name
-#   .debug_addr:   Three 8-byte addresses:
+#   .debug_addr:   Six 8-byte addresses:
 #                    index 0: 0x1000                (live - live_func)
 #                    index 1: 0xffffffffffffffff    (tombstone - dead_func)
 #                    index 2: 0x2000                (live - survivor)
+#                    index 3: 0x3000                (live - kept_method)
+#                    index 4: 0xffffffffffffffff    (tombstone - removed_method)
+#                    index 5: 0x4000                (live - neighbor_method)
 #   .debug_abbrev: abbreviation table for the skeleton CU
 
 	.section	.debug_info,"",@progbits
@@ -49,4 +52,7 @@
 	.quad	0x1000                          # Index 0: live (live_func)
 	.quad	0xffffffffffffffff              # Index 1: tombstone (dead_func)
 	.quad	0x2000                          # Index 2: live (survivor)
+	.quad	0x3000                          # Index 3: live (kept_method)
+	.quad	0xffffffffffffffff              # Index 4: tombstone (removed_method)
+	.quad	0x4000                          # Index 5: live (neighbor_method)
 .Laddr_end:
