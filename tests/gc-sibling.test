@@ -1,6 +1,10 @@
-# Test that GC patches DW_AT_sibling when the original target DIE is removed.
-# live_func has DW_AT_sibling pointing to dead_func; after GC removes dead_func,
-# the sibling must be patched to point to survivor instead.
+# Tests for DW_AT_sibling handling during garbage collection.
+# 1. DW_AT_sibling pointing to a DIE does not keep that DIE alive.
+# 2. DW_AT_sibling is adjusted correctly when the target DIE is removed
+#    (live_func's sibling pointed to dead_func; after removal it must point to survivor).
+# 3. DW_AT_sibling is not adjusted to point across a parent boundary
+#    (kept_method's sibling pointed to removed_method inside MyStruct; after removal
+#     the sibling must become null, not point to the Neighbor structure_type).
 
 # Assemble the .dwo (split debug info).
 # RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-sibling-dwo.s -o %t.dwo
@@ -8,15 +12,15 @@
 # Generate the exec assembly with the .dwo path substituted in, then assemble it.
 # RUN: sed 's|DWO_PATH|%t.dwo|' %p/inputs/gc-sibling-exec.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t.o
 
-# Baseline: all three subprograms survive when not garbage-collecting.
+# Baseline: all subprograms survive when not garbage-collecting.
 # RUN: thorin -e %t.o -o %t-nogc.dwp
 # RUN: llvm-dwarfdump -v %t-nogc.dwp | FileCheck --check-prefixes=CHECK,NOGC %s
 
-# With garbage collection the dead subprogram is removed and siblings patched.
+# With garbage collection the dead subprograms are removed and siblings patched.
 # RUN: thorin --gc -e %t.o -o %t-gc.dwp
 # RUN: llvm-dwarfdump -v %t-gc.dwp | FileCheck --check-prefixes=CHECK,GC %s
 
-# Verify sibling patching: live_func's sibling must point to survivor after GC.
+# Verify sibling patching in the GC output (needs its own pass to capture offsets).
 # RUN: llvm-dwarfdump -v %t-gc.dwp | FileCheck --check-prefix=GCSIBLING %s
 
 # CHECK:        .debug_info.dwo contents:
@@ -32,7 +36,8 @@
 # CHECK:            DW_TAG_base_type
 # CHECK-NEXT:         DW_AT_name [DW_FORM_string] ("int")
 
-# dead_func (addrx 1, tombstoned) is present only in the baseline.
+# dead_func (addrx 1, tombstoned) is present only in the baseline (case 1:
+# live_func's DW_AT_sibling pointing to dead_func does not keep it alive).
 # NOGC:          DW_TAG_subprogram
 # NOGC-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000001)
 # NOGC-NEXT:       DW_AT_sibling
@@ -43,12 +48,40 @@
 # CHECK-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000002)
 # CHECK-NEXT:       DW_AT_name [DW_FORM_string] ("survivor")
 
-# After garbage collection there must be no further subprograms.
-# GC:        NULL
-# GC-NOT:    DW_TAG_subprogram
+# MyStruct must always be present (retained as ancestor of kept_method).
+# CHECK:          DW_TAG_structure_type
+# CHECK-NEXT:       DW_AT_name [DW_FORM_string] ("MyStruct")
 
-# Verify that after GC, live_func's sibling offset points to survivor.
-# Capture the sibling target offset from live_func, then verify survivor is at that offset.
+# kept_method (addrx 3, live) must always be present with its sibling attribute.
+# CHECK:            DW_TAG_subprogram
+# CHECK-NEXT:         DW_AT_low_pc [DW_FORM_addrx] (indexed (00000003)
+# CHECK-NEXT:         DW_AT_sibling [DW_FORM_ref4]
+# CHECK-NEXT:         DW_AT_name [DW_FORM_string] ("kept_method")
+
+# The base_type "char" child of kept_method must always be present.
+# CHECK:              DW_TAG_base_type
+# CHECK-NEXT:           DW_AT_name [DW_FORM_string] ("char")
+
+# removed_method (addrx 4, tombstoned) is present only in the baseline.
+# NOGC:            DW_TAG_subprogram
+# NOGC-NEXT:         DW_AT_low_pc [DW_FORM_addrx] (indexed (00000004)
+# NOGC-NEXT:         DW_AT_name [DW_FORM_string] ("removed_method")
+
+# After removal, removed_method must be gone.
+# GC-NOT:          removed_method
+
+# Neighbor must always be present (retained as ancestor of neighbor_method).
+# CHECK:          DW_TAG_structure_type
+# CHECK-NEXT:       DW_AT_name [DW_FORM_string] ("Neighbor")
+
+# neighbor_method (addrx 5, live) must always be present.
+# CHECK:            DW_TAG_subprogram
+# CHECK-NEXT:         DW_AT_low_pc [DW_FORM_addrx] (indexed (00000005)
+# CHECK-NEXT:         DW_AT_name [DW_FORM_string] ("neighbor_method")
+
+# --- Sibling patching verification (separate pass over GC output) ---
+
+# Verify live_func's sibling offset points to survivor after removal (case 2).
 # GCSIBLING:        .debug_info.dwo contents:
 # GCSIBLING:          DW_TAG_subprogram
 # GCSIBLING-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000000)
@@ -56,3 +89,12 @@
 # GCSIBLING:        [[SIBOFF]]: DW_TAG_subprogram
 # GCSIBLING-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000002)
 # GCSIBLING-NEXT:       DW_AT_name [DW_FORM_string] ("survivor")
+
+# Verify kept_method's sibling points to the parent's null terminator
+# after removal (case 3). It must NOT point to the Neighbor structure_type
+# which is not a sibling.
+# GCSIBLING:          DW_TAG_subprogram
+# GCSIBLING-NEXT:       DW_AT_low_pc [DW_FORM_addrx] (indexed (00000003)
+# GCSIBLING-NEXT:       DW_AT_sibling [DW_FORM_ref4] (cu + 0x{{[0-9a-f]+}} => {[[NULLOFF:0x[0-9a-f]+]]}
+# GCSIBLING-NEXT:       DW_AT_name [DW_FORM_string] ("kept_method")
+# GCSIBLING:        [[NULLOFF]]:     NULL

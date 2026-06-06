@@ -37,10 +37,11 @@ use crate::{
 pub(crate) struct GcResult {
     /// Rewritten `.debug_info.dwo` bytes, or `None` if nothing was removed.
     pub rewritten: Option<EndianVec<RunTimeEndian>>,
-    /// Map from old DIE offsets to new offsets after dead DIEs were removed.
+    /// Map from old DIE offsets to new offsets after dead DIEs were removed
+    /// and their level in the DIE tree.
     /// Present only when `rewritten` is `Some`. Used to patch CU-relative references
     /// embedded in location list expressions.
-    pub offset_remap: Option<BTreeMap<gimli::UnitOffset, gimli::UnitOffset>>,
+    pub offset_remap: Option<BTreeMap<gimli::UnitOffset, (gimli::UnitOffset, usize)>>,
     /// `rnglistx` index values referenced by surviving DIEs, or `None` if the section
     /// cannot be safely pruned (e.g. a DIE used `DW_FORM_sec_offset` for `DW_AT_ranges`).
     pub referenced_rnglists: Option<BTreeSet<u64>>,
@@ -341,7 +342,7 @@ where
 pub(crate) fn patch_debug_loc(
     data: gimli::EndianSlice<'_, RunTimeEndian>,
     encoding: gimli::Encoding,
-    offset_remap: &BTreeMap<gimli::UnitOffset, gimli::UnitOffset>,
+    offset_remap: &BTreeMap<gimli::UnitOffset, (gimli::UnitOffset, usize)>,
 ) -> Result<Option<Vec<u8>>> {
     let raw = data.slice();
     if raw.is_empty() {
@@ -372,7 +373,7 @@ pub(crate) fn patch_debug_loc(
 pub(crate) fn rewrite_loclists(
     data: gimli::EndianSlice<'_, RunTimeEndian>,
     referenced_indices: Option<&BTreeSet<u64>>,
-    offset_remap: Option<&BTreeMap<gimli::UnitOffset, gimli::UnitOffset>>,
+    offset_remap: Option<&BTreeMap<gimli::UnitOffset, (gimli::UnitOffset, usize)>>,
 ) -> Result<Option<Vec<u8>>> {
     if data.is_empty() {
         return Ok(None);
@@ -517,7 +518,7 @@ fn patch_loclist_data(
     raw: &[u8],
     endian: RunTimeEndian,
     encoding: gimli::Encoding,
-    offset_remap: &BTreeMap<gimli::UnitOffset, gimli::UnitOffset>,
+    offset_remap: &BTreeMap<gimli::UnitOffset, (gimli::UnitOffset, usize)>,
     patched: &mut [u8],
 ) -> Result<bool> {
     use gimli::constants::*;
@@ -1554,7 +1555,7 @@ fn rewrite_unit(
     rnglist_remap: Option<&HashMap<u64, u64>>,
     loclist_remap: Option<&HashMap<u64, u64>>,
     strx_remap: Option<&HashMap<u64, u64>>,
-) -> Result<(EndianVec<RunTimeEndian>, BTreeMap<gimli::UnitOffset, gimli::UnitOffset>)> {
+) -> Result<(EndianVec<RunTimeEndian>, BTreeMap<gimli::UnitOffset, (gimli::UnitOffset, usize)>)> {
     let endian = debug_info.reader().endian();
     let encoding = header.encoding();
     let header_size = header.size_of_header();
@@ -1634,11 +1635,11 @@ fn emit_dies(
     abbreviations: &gimli::Abbreviations,
     dies: &[DieRecord],
     offset_to_index: &HashMap<gimli::UnitOffset, usize>,
-    patch: Option<&BTreeMap<gimli::UnitOffset, gimli::UnitOffset>>,
+    patch: Option<&BTreeMap<gimli::UnitOffset, (gimli::UnitOffset, usize)>>,
     rnglist_remap: Option<&HashMap<u64, u64>>,
     loclist_remap: Option<&HashMap<u64, u64>>,
     strx_remap: Option<&HashMap<u64, u64>>,
-    new_offset: &mut BTreeMap<gimli::UnitOffset, gimli::UnitOffset>,
+    new_offset: &mut BTreeMap<gimli::UnitOffset, (gimli::UnitOffset, usize)>,
     out: &mut EndianVec<RunTimeEndian>,
 ) -> Result<()> {
     let mut entries_raw = header.entries_raw(abbreviations, None).map_err(Error::ParseUnit)?;
@@ -1649,10 +1650,12 @@ fn emit_dies(
 
     while !entries_raw.is_empty() {
         let die_start = entries_raw.next_offset();
+        let new_off = gimli::UnitOffset(header.root_offset().0 + out.slice().len());
         let Some(abbrev) =
             entries_raw.read_abbreviation().map_err(Error::ParseUnitAbbreviations)?
         else {
             if emit_stack.pop() == Some(true) {
+                new_offset.insert(die_start, (new_off, emit_stack.len() + 1));
                 out.write_u8(0)?;
             }
             continue;
@@ -1662,8 +1665,7 @@ fn emit_dies(
         let emit = dies[die_index].liveness != Liveness::Dead;
 
         if emit {
-            new_offset
-                .insert(die_start, gimli::UnitOffset(header.root_offset().0 + out.slice().len()));
+            new_offset.insert(die_start, (new_off, emit_stack.len()));
 
             let after_code = entries_raw.next_offset();
             out.write(&header.range(die_start..after_code)?)?;
@@ -1677,6 +1679,7 @@ fn emit_dies(
                         header,
                         header.range(attr_start..attr_end)?,
                         spec,
+                        emit_stack.len(),
                         patch,
                         rnglist_remap,
                         loclist_remap,
@@ -1703,7 +1706,8 @@ fn emit_attribute(
     header: &gimli::UnitHeader<gimli::EndianSlice<'_, RunTimeEndian>>,
     mut data: gimli::EndianSlice<'_, RunTimeEndian>,
     spec: &gimli::AttributeSpecification,
-    patch: Option<&BTreeMap<gimli::UnitOffset, gimli::UnitOffset>>,
+    depth: usize,
+    patch: Option<&BTreeMap<gimli::UnitOffset, (gimli::UnitOffset, usize)>>,
     rnglist_remap: Option<&HashMap<u64, u64>>,
     loclist_remap: Option<&HashMap<u64, u64>>,
     strx_remap: Option<&HashMap<u64, u64>>,
@@ -1726,6 +1730,7 @@ fn emit_attribute(
             header,
             data,
             &inner_spec,
+            depth,
             patch,
             rnglist_remap,
             loclist_remap,
@@ -1744,15 +1749,19 @@ fn emit_attribute(
     if matches!(form, DW_FORM_ref1 | DW_FORM_ref2 | DW_FORM_ref4 | DW_FORM_ref8 | DW_FORM_ref_udata)
     {
         let old = read_ref_value(data, form)?;
-        let new = match patch.get(&old).copied() {
-            Some(n) => n,
+        let new = match patch.get(&old) {
+            Some(n) => n.0,
             None => {
                 // Target was dead. For DW_AT_sibling this can happen.
                 // Otherwise this should be impossible.
                 if name == DW_AT_sibling {
-                    // Find the next surviving sibling's new offset. If None,
-                    // emit 0.
-                    patch.range(old..).next().map_or(gimli::UnitOffset(0), |(_, v)| *v)
+                    patch
+                        .range(old..)
+                        .skip_while(|&(_, v)| v.1 > depth)
+                        .next()
+                        .expect("DW_TAG_null should have been in the patch map.")
+                        .1
+                         .0
                 } else {
                     unreachable!();
                 }
@@ -1862,7 +1871,7 @@ fn write_ref_value(
 /// CU-relative DIE references to their new offsets.
 fn emit_expression(
     expr: gimli::EndianSlice<'_, RunTimeEndian>,
-    patch: &BTreeMap<gimli::UnitOffset, gimli::UnitOffset>,
+    patch: &BTreeMap<gimli::UnitOffset, (gimli::UnitOffset, usize)>,
     encoding: gimli::Encoding,
     out: &mut EndianVec<RunTimeEndian>,
 ) -> Result<()> {
@@ -1891,7 +1900,7 @@ fn emit_expression(
     for r in &refs {
         // Copy bytes up to the reference operand.
         out.write(&expr[copied..r.pos])?;
-        let new = patch.get(&r.old).copied().ok_or(Error::MalformedDebugInfo)?;
+        let new = patch.get(&r.old).ok_or(Error::MalformedDebugInfo)?.0;
         match r.enc {
             ExprRefEnc::U2 => {
                 out.write_u16(new.0 as u16)?;

@@ -7,6 +7,12 @@
 #     subprogram "dead_func": DW_AT_low_pc = addrx 1 (tombstoned), DW_AT_sibling -> survivor (children)
 #       base_type "float"
 #     subprogram "survivor": DW_AT_low_pc = addrx 2 (live), no children
+#     structure_type "MyStruct" (children)
+#       subprogram "kept_method": DW_AT_low_pc = addrx 3 (live), DW_AT_sibling -> removed_method (children)
+#         base_type "char"
+#       subprogram "removed_method": DW_AT_low_pc = addrx 4 (tombstoned), no children
+#     structure_type "Neighbor" (children)
+#       subprogram "neighbor_method": DW_AT_low_pc = addrx 5 (live), no children
 #
 # The DWO ID is 0xdeadc0de.
 
@@ -60,6 +66,43 @@
 	.byte	2                               # DW_AT_low_pc: addrx index 2
 	.asciz	"survivor"                      # DW_AT_name
 
+	# Abbrev 5: DW_TAG_structure_type "MyStruct" (has children)
+	.byte	5
+	.asciz	"MyStruct"                      # DW_AT_name
+
+	# Abbrev 2: DW_TAG_subprogram "kept_method" (has children, with sibling)
+	.byte	2
+	.byte	3                               # DW_AT_low_pc: addrx index 3
+	.long	.Lremoved_method-.Ldebug_info_dwo_start+4 # DW_AT_sibling: ref4 -> removed_method
+	.asciz	"kept_method"                   # DW_AT_name
+
+	# child: base_type "char"
+	.byte	3                               # Abbrev 3: DW_TAG_base_type
+	.asciz	"char"                          # DW_AT_name
+	.byte	1                               # DW_AT_byte_size
+	.byte	8                               # DW_AT_encoding (DW_ATE_unsigned_char)
+
+	.byte	0                               # End Of Children Mark (kept_method)
+
+	# Abbrev 4: DW_TAG_subprogram "removed_method" (no children)
+.Lremoved_method:
+	.byte	4
+	.byte	4                               # DW_AT_low_pc: addrx index 4
+	.asciz	"removed_method"                # DW_AT_name
+
+	.byte	0                               # End Of Children Mark (MyStruct)
+
+	# Abbrev 5: DW_TAG_structure_type "Neighbor" (has children)
+	.byte	5
+	.asciz	"Neighbor"                      # DW_AT_name
+
+	# Abbrev 4: DW_TAG_subprogram "neighbor_method" (no children)
+	.byte	4
+	.byte	5                               # DW_AT_low_pc: addrx index 5
+	.asciz	"neighbor_method"               # DW_AT_name
+
+	.byte	0                               # End Of Children Mark (Neighbor)
+
 	.byte	0                               # End Of Children Mark (compile_unit)
 .Ldebug_info_dwo_end:
 
@@ -103,6 +146,15 @@
 	.byte	0                               # DW_CHILDREN_no
 	.byte	17                              # DW_AT_low_pc
 	.byte	27                              # DW_FORM_addrx
+	.byte	3                               # DW_AT_name
+	.byte	8                               # DW_FORM_string
+	.byte	0                               # EOM(1)
+	.byte	0                               # EOM(2)
+
+	# Abbrev 5: DW_TAG_structure_type, has children, DW_AT_name(string)
+	.byte	5                               # Abbreviation Code
+	.byte	19                              # DW_TAG_structure_type
+	.byte	1                               # DW_CHILDREN_yes
 	.byte	3                               # DW_AT_name
 	.byte	8                               # DW_FORM_string
 	.byte	0                               # EOM(1)
