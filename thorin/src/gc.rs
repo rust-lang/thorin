@@ -241,16 +241,6 @@ where
 
         if any_removed {
             modified_count += 1;
-            // A DIE can survive GC for reasons other than its own ranges (e.g. reachable
-            // via an attribute edge). If we strip every tombstoned entry the list becomes
-            // empty, which a debugger would interpret as "zero ranges" rather than "dead."
-            // Keep one tombstoned entry so the list remains recognizably tombstoned.
-            if entries.is_empty() {
-                let mut first_iter = range_lists.raw_ranges(offset, encoding)?;
-                if let Some(entry) = first_iter.next()? {
-                    entries.push(entry);
-                }
-            }
         }
 
         parsed_lists.push(ParsedList(entries));
