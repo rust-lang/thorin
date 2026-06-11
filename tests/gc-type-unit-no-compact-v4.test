@@ -1,0 +1,34 @@
+# Test that the presence of a type unit in a separate .debug_types.dwo section
+# (DWARF4) disables compaction of the .debug_str_offsets.dwo table, since the
+# type unit shares that section with the compilation unit.
+#
+# Dead DIEs should still be removed from .debug_info.dwo.
+
+# Assemble the .dwo (split debug info).
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-type-unit-no-compact-v4-dwo.s -o %t.dwo
+
+# Generate the exec assembly with the .dwo path substituted in, then assemble it.
+# RUN: sed 's|DWO_PATH|%t.dwo|' %p/inputs/gc-type-unit-no-compact-v4-exec.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t.o
+
+# With garbage collection the dead subprogram is removed but str_offsets are NOT compacted.
+# RUN: thorin --gc -e %t.o -o %t-gc.dwp
+# RUN: llvm-dwarfdump -debug-info -debug-str-offsets -debug-str %t-gc.dwp | FileCheck %s
+
+# -- debug_info checks: dead DIE is still removed --
+# CHECK:        .debug_info.dwo contents:
+# CHECK:        DW_TAG_compile_unit
+# CHECK:          DW_AT_name	("test.c")
+# CHECK:          DW_AT_comp_dir	("/home")
+# CHECK:          DW_TAG_subprogram
+# CHECK:            DW_AT_name	("live_func")
+# CHECK:          NULL
+# CHECK-NOT:    DW_TAG_subprogram
+
+# -- str_offsets: table is NOT compacted (still 5 entries, 5*4 = 20 bytes, no header in DWARF4) --
+# CHECK:        .debug_str_offsets.dwo contents:
+# CHECK:        Contribution size = 20
+# CHECK:        "test.c"
+# CHECK:        "/home"
+# CHECK:        "live_func"
+# CHECK:        "dead_func"
+# CHECK:        "int"
