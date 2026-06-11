@@ -114,6 +114,62 @@ fn encode_raw_rng_entry(
     Ok(())
 }
 
+/// Reassemble a `.debug_rnglists.dwo` or `.debug_loclists.dwo` section from
+/// pre-encoded list bodies. Writes the unit header, offset table, and list data.
+fn reassemble_offset_table_section(
+    encoded_lists: &[Vec<u8>],
+    header: &gimli::ListsHeader,
+    endian: RunTimeEndian,
+) -> Result<Vec<u8>> {
+    let encoding = header.encoding;
+    let word_size = encoding.format.word_size() as usize;
+    let new_entry_count = encoded_lists.len() as u32;
+    let new_offset_array_size = new_entry_count as usize * word_size;
+
+    let mut new_offsets: Vec<u64> = Vec::with_capacity(encoded_lists.len());
+    let mut running_offset: u64 = new_offset_array_size as u64;
+    for enc in encoded_lists {
+        new_offsets.push(running_offset);
+        running_offset += enc.len() as u64;
+    }
+    let total_entries_size = running_offset - new_offset_array_size as u64;
+
+    let initial_length_size = encoding.format.initial_length_size() as u64;
+    let new_unit_length: u64 = header.size() as u64 - initial_length_size
+        + (new_entry_count as u64 * word_size as u64)
+        + total_entries_size;
+
+    let mut out = EndianVec::new(endian);
+
+    if encoding.format == gimli::Format::Dwarf64 {
+        out.write_u32(0xffff_ffff)?;
+        out.write_u64(new_unit_length)?;
+    } else {
+        out.write_u32(
+            new_unit_length.try_into().expect("unit length w/out header larger than u32"),
+        )?;
+    }
+
+    out.write_u16(encoding.version)?;
+    out.write_u8(encoding.address_size)?;
+    out.write_u8(0)?;
+    out.write_u32(new_entry_count)?;
+
+    for &off in &new_offsets {
+        if encoding.format == gimli::Format::Dwarf64 {
+            out.write_u64(off)?;
+        } else {
+            out.write_u32(off.try_into().expect("offset larger than u32"))?;
+        }
+    }
+
+    for enc in encoded_lists {
+        out.write(enc)?;
+    }
+
+    Ok(out.into_vec())
+}
+
 /// Rewrite a `.debug_rnglists.dwo` section: remove tombstoned entries and replace
 /// unreferenced range lists with empty ones.
 ///
@@ -139,7 +195,6 @@ where
     let encoding = header.encoding;
     let offset_entry_count = header.offset_entry_count;
     let address_size = encoding.address_size;
-    let word_size = encoding.format.word_size() as usize;
 
     let header_size = header.size() as usize;
 
@@ -274,51 +329,7 @@ where
         encoded_lists.push(buf.into_vec());
     }
 
-    // Compute new offsets.
-    let new_offset_array_size = new_entry_count as usize * word_size;
-    let mut new_offsets: Vec<u64> = Vec::with_capacity(encoded_lists.len());
-    let mut running_offset: u64 = new_offset_array_size as u64;
-    for enc in &encoded_lists {
-        new_offsets.push(running_offset);
-        running_offset += enc.len() as u64;
-    }
-    let total_entries_size = running_offset - new_offset_array_size as u64;
-
-    let initial_length_size = encoding.format.initial_length_size() as u64;
-    let new_unit_length: u64 = header.size() as u64 - initial_length_size
-        + (new_entry_count as u64 * word_size as u64)
-        + total_entries_size;
-
-    // And write.
-    let mut out = EndianVec::new(endian);
-
-    if encoding.format == gimli::Format::Dwarf64 {
-        out.write_u32(0xffff_ffff)?;
-        out.write_u64(new_unit_length)?;
-    } else {
-        out.write_u32(
-            new_unit_length.try_into().expect("unit length w/out header larger than u32"),
-        )?;
-    }
-
-    out.write_u16(encoding.version)?;
-    out.write_u8(address_size)?;
-    out.write_u8(0)?;
-    out.write_u32(new_entry_count)?;
-
-    for &off in &new_offsets {
-        if encoding.format == gimli::Format::Dwarf64 {
-            out.write_u64(off)?;
-        } else {
-            out.write_u32(off.try_into().expect("offset larger than u32"))?;
-        }
-    }
-
-    for enc in &encoded_lists {
-        out.write(enc)?;
-    }
-
-    Ok(Some(out.into_vec()))
+    Ok(Some(reassemble_offset_table_section(&encoded_lists, &header, endian)?))
 }
 
 /// Patch CU-relative references in DWARF expressions within a `.debug_loc.dwo` section.
@@ -375,9 +386,6 @@ pub(crate) fn rewrite_loclists(
     let header = gimli::ListsHeader::parse(&mut input)?;
     let encoding = header.encoding;
     let offset_entry_count = header.offset_entry_count;
-    let address_size = encoding.address_size;
-    let word_size = encoding.format.word_size() as usize;
-
     let header_size = header.size() as usize;
     let debug_loclists = gimli::DebugLocLists::from(data);
     let debug_loc = gimli::DebugLoc::from(gimli::EndianSlice::new(&[][..], endian));
@@ -449,52 +457,7 @@ pub(crate) fn rewrite_loclists(
         );
     }
 
-    // Compute new offsets.
-    let new_entry_count = encoded_lists.len() as u32;
-    let new_offset_array_size = new_entry_count as usize * word_size;
-    let mut new_offsets: Vec<u64> = Vec::with_capacity(encoded_lists.len());
-    let mut running_offset: u64 = new_offset_array_size as u64;
-    for enc in &encoded_lists {
-        new_offsets.push(running_offset);
-        running_offset += enc.len() as u64;
-    }
-    let total_entries_size = running_offset - new_offset_array_size as u64;
-
-    let initial_length_size = encoding.format.initial_length_size() as u64;
-    let new_unit_length: u64 = header.size() as u64 - initial_length_size
-        + (new_entry_count as u64 * word_size as u64)
-        + total_entries_size;
-
-    // And write.
-    let mut out = EndianVec::new(endian);
-
-    if encoding.format == gimli::Format::Dwarf64 {
-        out.write_u32(0xffff_ffff)?;
-        out.write_u64(new_unit_length)?;
-    } else {
-        out.write_u32(
-            new_unit_length.try_into().expect("unit length w/out header larger than u32"),
-        )?;
-    }
-
-    out.write_u16(encoding.version)?;
-    out.write_u8(address_size)?;
-    out.write_u8(0)?;
-    out.write_u32(new_entry_count)?;
-
-    for &off in &new_offsets {
-        if encoding.format == gimli::Format::Dwarf64 {
-            out.write_u64(off)?;
-        } else {
-            out.write_u32(off.try_into().expect("offset larger than u32"))?;
-        }
-    }
-
-    for enc in &encoded_lists {
-        out.write(enc)?;
-    }
-
-    Ok(Some(out.into_vec()))
+    Ok(Some(reassemble_offset_table_section(&encoded_lists, &header, endian)?))
 }
 
 /// Patch CU-relative references in DWARF expressions within location list entries.
