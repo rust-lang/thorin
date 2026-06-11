@@ -1,0 +1,49 @@
+# Test that a .dwo passed as a positional input with --gc whose DWO ID
+# does not match any executable still has its sections (str_offsets, etc.)
+# preserved in the output .dwp.
+#
+# Before the emit_gc_sections fix, maybe_gc returned early for
+# unreferenced dwo_ids, silently dropping saved sections (str_offsets,
+# rnglists, loclists) even though the debug_info was still appended.
+
+# Assemble the matching .dwo (DWO ID 0xaa, referenced by the executable).
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-unreferenced-dwo-matching-dwo.s -o %t-matching.dwo
+
+# Assemble the unreferenced .dwo (DWO ID 0xbb, NOT referenced by any executable).
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-unreferenced-dwo-dwo.s -o %t-unreferenced.dwo
+
+# Generate the exec assembly with the matching .dwo path substituted in, then assemble it.
+# RUN: sed 's|DWO_PATH|%t-matching.dwo|' %p/inputs/gc-unreferenced-dwo-exec.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t.o
+
+# Run thorin with --gc, passing the unreferenced .dwo as a positional input.
+# RUN: thorin --gc -e %t.o %t-unreferenced.dwo -o %t.dwp
+
+# Verify both CUs are present in the output with their sections.
+# RUN: llvm-dwarfdump -debug-info -debug-str-offsets -debug-str %t.dwp | FileCheck %s
+
+# Positional inputs are processed first, so unreferenced CU (0xbb) comes first.
+# CHECK:       .debug_info.dwo contents:
+
+# CHECK:       DW_TAG_compile_unit
+# CHECK:         DW_AT_name ("other.c")
+# CHECK:       DW_TAG_subprogram
+# CHECK:         DW_AT_name ("some_func")
+
+# The matching CU (0xaa) follows.
+# CHECK:       DW_TAG_compile_unit
+# CHECK:         DW_AT_name ("main.c")
+
+# Both CUs' strings must be in .debug_str.dwo.
+# CHECK:       .debug_str.dwo contents:
+# CHECK-DAG:   "other.c"
+# CHECK-DAG:   "some_func"
+# CHECK-DAG:   "main.c"
+
+# Both CUs' str_offsets contributions must be present.
+# CHECK:       .debug_str_offsets.dwo contents:
+# CHECK:       Contribution size = 16
+# CHECK:       "other.c"
+# CHECK:       "/src"
+# CHECK:       "some_func"
+# CHECK:       Contribution size = 8
+# CHECK:       "main.c"
