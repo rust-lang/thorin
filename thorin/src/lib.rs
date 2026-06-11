@@ -4,8 +4,8 @@ use std::{
     borrow::Cow,
     collections::HashSet,
     fmt,
-    ops::Deref,
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 use gimli::{EndianSlice, Reader, ReaderOffset, UnitType};
@@ -58,14 +58,10 @@ pub trait Session<Relocations> {
 
     /// Returns a reference to contents of file at `path` with lifetime `'session`.
     fn read_input<'session>(&'session self, path: &Path) -> std::io::Result<&'session [u8]>;
-
-    type DataHolder<T>: Deref<Target = T> + From<T> + Clone;
 }
 
-struct ExecutableData<'session, Relocations, Sess: Session<Relocations>>(
-    Sess::DataHolder<
-        gimli::Dwarf<Relocate<'session, gimli::EndianSlice<'session, gimli::RunTimeEndian>>>,
-    >,
+struct ExecutableData<'session>(
+    Rc<gimli::Dwarf<Relocate<'session, gimli::EndianSlice<'session, gimli::RunTimeEndian>>>>,
 );
 
 struct DwoData {
@@ -73,47 +69,31 @@ struct DwoData {
     addr_base: gimli::DebugAddrBase<usize>,
 }
 
-struct GarbageCollectionData<'session, Relocations, Sess>
-where
-    Sess: Session<Relocations>,
-{
-    executable_data: HashMap<PathBuf, ExecutableData<'session, Relocations, Sess>>,
+struct GarbageCollectionData<'session> {
+    executable_data: HashMap<PathBuf, ExecutableData<'session>>,
     dwo_data: HashMap<DwoId, (PathBuf, DwoData)>,
 }
 
-impl<'session, Relocations, Sess> Default for GarbageCollectionData<'session, Relocations, Sess>
-where
-    Sess: Session<Relocations>,
-{
+impl Default for GarbageCollectionData<'_> {
     fn default() -> Self {
         Self { executable_data: Default::default(), dwo_data: Default::default() }
     }
 }
 
-impl<'session, Relocations, Sess> GarbageCollectionData<'session, Relocations, Sess>
-where
-    Sess: Session<Relocations>,
-{
-    fn put_data_for_executable(
-        &mut self,
-        path: &Path,
-        data: ExecutableData<'session, Relocations, Sess>,
-    ) {
+impl<'session> GarbageCollectionData<'session> {
+    fn put_data_for_executable(&mut self, path: &Path, data: ExecutableData<'session>) {
         self.executable_data.insert(path.to_path_buf(), data);
     }
     fn put_data_for_dwo(&mut self, executable_path: &'_ Path, dwo_id: DwoId, data: DwoData) {
         self.dwo_data.entry(dwo_id).insert((executable_path.to_path_buf(), data));
     }
-    fn get_data_for_executable(
-        &self,
-        path: &'_ Path,
-    ) -> Option<&ExecutableData<'session, Relocations, Sess>> {
+    fn get_data_for_executable(&self, path: &'_ Path) -> Option<&ExecutableData<'session>> {
         self.executable_data.get(path)
     }
     fn get_data_for_dwo(
         &self,
         dwo_id: DwoId,
-    ) -> Option<(&ExecutableData<'session, Relocations, Sess>, &DwoData)> {
+    ) -> Option<(&ExecutableData<'session>, &DwoData)> {
         let (ref executable_path, ref dwo_data) = self.dwo_data.get(&dwo_id)?;
         let executable_data = self.executable_data.get(executable_path)?;
         Some((executable_data, dwo_data))
@@ -178,7 +158,7 @@ impl MissingReferencedObjectBehaviour {
 /// `finish`.
 pub struct DwarfPackage<'output, 'session: 'output, Sess: Session<RelocationMap>> {
     sess: &'session Sess,
-    gc_data: Option<GarbageCollectionData<'session, RelocationMap, Sess>>,
+    gc_data: Option<GarbageCollectionData<'session>>,
     maybe_in_progress: Option<InProgressDwarfPackage<'output>>,
     targets: HashSet<DwarfObject>,
 }
@@ -405,7 +385,7 @@ where
 
     #[tracing::instrument(level = "trace")]
     pub fn preprocess_gc_executable(&mut self, path: &Path) -> Result<()> {
-        let dwarf = Sess::DataHolder::from(dwarf_from_executable(self.sess, path)?);
+        let dwarf = Rc::new(dwarf_from_executable(self.sess, path)?);
         let gc_data = self.gc_data.get_or_insert_default();
         gc_data.put_data_for_executable(path, ExecutableData(dwarf.clone()));
 

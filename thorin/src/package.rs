@@ -362,12 +362,12 @@ impl<'file> DwarfPackageObject<'file> {
     }
 }
 
-pub(crate) struct GcSessionData<'input, 'gc, 'session, Relocations, Sess>
+pub(crate) struct GcSessionData<'input, 'gc, 'session, Sess>
 where
-    Sess: Session<Relocations>,
+    Sess: Session<RelocationMap>,
 {
     session: &'session Sess,
-    gc_data: &'gc GarbageCollectionData<'session, Relocations, Sess>,
+    gc_data: &'gc GarbageCollectionData<'session>,
     debug_loc: Cow<'input, [u8]>,
     debug_loclists: Cow<'input, [u8]>,
     debug_rnglists: Cow<'input, [u8]>,
@@ -375,18 +375,17 @@ where
     debug_str: gimli::DebugStr<gimli::EndianSlice<'input, RunTimeEndian>>,
 }
 
-pub(crate) enum SessionHolder<'input, 'gc, 'session, Relocations, Sess>
+pub(crate) enum SessionHolder<'input, 'gc, 'session, Sess>
 where
-    Sess: Session<Relocations>,
+    Sess: Session<RelocationMap>,
 {
     SimpleSession(&'session Sess),
-    GcSession(GcSessionData<'input, 'gc, 'session, Relocations, Sess>),
+    GcSession(GcSessionData<'input, 'gc, 'session, Sess>),
 }
 
-impl<'input, 'gc, 'session, Relocations, Sess>
-    SessionHolder<'input, 'gc, 'session, Relocations, Sess>
+impl<'input, 'gc, 'session, Sess> SessionHolder<'input, 'gc, 'session, Sess>
 where
-    Sess: Session<Relocations>,
+    Sess: Session<RelocationMap>,
 {
     fn session(&'_ self) -> &'session Sess {
         match self {
@@ -454,7 +453,7 @@ where
 }
 
 impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
-    SessionHolder<'input, 'gc, 'session, RelocationMap, S>
+    SessionHolder<'input, 'gc, 'session, S>
 {
     fn maybe_gc(
         &mut self,
@@ -606,7 +605,7 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
 
     pub(crate) fn new_gc(
         sess: &'session S,
-        gc_data: &'gc GarbageCollectionData<'session, RelocationMap, S>,
+        gc_data: &'gc GarbageCollectionData<'session>,
     ) -> Self {
         SessionHolder::GcSession(GcSessionData {
             session: sess,
@@ -677,7 +676,7 @@ impl<'file> InProgressDwarfPackage<'file> {
     #[tracing::instrument(level = "trace", skip(sess, input))]
     pub(crate) fn add_input_object<'input, 'gc, 'session: 'input>(
         &mut self,
-        mut sess: SessionHolder<'input, 'gc, 'session, RelocationMap, impl Session<RelocationMap>>,
+        mut sess: SessionHolder<'input, 'gc, 'session, impl Session<RelocationMap>>,
         input: &object::File<'input>,
         encoding: Encoding,
     ) -> Result<()> {

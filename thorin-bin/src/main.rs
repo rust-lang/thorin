@@ -4,7 +4,6 @@ use std::{
     fs::{File, OpenOptions},
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
-    rc::Rc,
 };
 
 use anyhow::{Context, Result};
@@ -76,8 +75,6 @@ impl<Relocations> thorin::Session<Relocations> for Session<Relocations> {
         let mmap = (unsafe { Mmap::map(&file) })?;
         Ok(self.alloc_mmap(mmap))
     }
-
-    type DataHolder<T> = Rc<T>;
 }
 
 /// Returns `true` if the file type is a fifo.
