@@ -397,7 +397,7 @@ where
                 Some(DwarfObject::Compilation(dwo_id)) => dwo_id,
                 Some(_) => continue,
                 None => {
-                    debug!("no target 2");
+                    debug!("skipping unit without DWO ID in executable skeleton");
                     continue;
                 }
             };
