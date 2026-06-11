@@ -456,6 +456,51 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
     SessionHolder<'input, 'gc, 'session, S>
 {
     fn maybe_gc(
+        data: &GcSessionData<'input, 'gc, 'session, S>,
+        id: DwarfObject,
+        debug_info: &'input [u8],
+        debug_abbrev: &gimli::DebugAbbrev<gimli::EndianSlice<'input, RunTimeEndian>>,
+        endian: RunTimeEndian,
+        has_type_units: bool,
+    ) -> Result<Option<crate::gc::GcResult>> {
+        let DwarfObject::Compilation(dwo_id) = id else {
+            return Ok(None);
+        };
+        let Some((executable_data, dwo_data)) = data.gc_data.get_data_for_dwo(dwo_id) else {
+            return Ok(None);
+        };
+
+        let addr_resolver = |index| {
+            executable_data
+                .0
+                .debug_addr
+                .get_address(dwo_data.addr_size, dwo_data.addr_base, index)
+                .map(Some)
+                .map_err(Into::into)
+        };
+
+        let gc_result = crate::gc::gc_debug_info(
+            gimli::DebugInfo::new(debug_info, endian),
+            *debug_abbrev,
+            gimli::LocationLists::new(
+                gimli::DebugLoc::from(gimli::EndianSlice::new(&data.debug_loc, endian)),
+                gimli::DebugLocLists::from(gimli::EndianSlice::new(&data.debug_loclists, endian)),
+            ),
+            gimli::RangeLists::new(executable_data.0.ranges.debug_ranges().clone(), {
+                let relocations = data.session.alloc_relocation(RelocationMap::default());
+                let section = gimli::EndianSlice::new(&data.debug_rnglists, endian);
+                let reader = section;
+                gimli::DebugRngLists::from(Relocate { relocations, section, reader })
+            }),
+            addr_resolver,
+            dwo_id,
+            has_type_units,
+        )?;
+
+        Ok(Some(gc_result))
+    }
+
+    fn emit_gc_sections(
         &mut self,
         id: DwarfObject,
         encoding: Encoding,
@@ -474,43 +519,8 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
         let SessionHolder::GcSession(ref mut data) = self else {
             return Ok(None);
         };
-        let DwarfObject::Compilation(dwo_id) = id else {
-            return Ok(None);
-        };
-        let Some((executable_data, dwo_data)) = data.gc_data.get_data_for_dwo(dwo_id) else {
-            return Ok(None);
-        };
 
-        let addr_resolver = |index| {
-            executable_data
-                .0
-                .debug_addr
-                .get_address(dwo_data.addr_size, dwo_data.addr_base, index)
-                .map(Some)
-                .map_err(Into::into)
-        };
-
-        let mut gc_result = crate::gc::gc_debug_info(
-            gimli::DebugInfo::new(debug_info, endian),
-            *debug_abbrev,
-            gimli::LocationLists::new(
-                gimli::DebugLoc::from(gimli::EndianSlice::new(&data.debug_loc, endian)),
-                gimli::DebugLocLists::from(gimli::EndianSlice::new(&data.debug_loclists, endian)),
-            ),
-            gimli::RangeLists::new(executable_data.0.ranges.debug_ranges().clone(), {
-                // NB: .debug_ranges has to be relocated because it lives in
-                // the executable. A .dwo's .debug_rnglists shouldn't need to
-                // be relocated, but we have to make the types match for gimli.
-                // Create a no-op Relocate for this data.
-                let relocations = data.session.alloc_relocation(RelocationMap::default());
-                let section = gimli::EndianSlice::new(&data.debug_rnglists, endian);
-                let reader = section;
-                gimli::DebugRngLists::from(Relocate { relocations, section, reader })
-            }),
-            addr_resolver,
-            dwo_id,
-            has_type_units,
-        )?;
+        let mut gc_result = Self::maybe_gc(data, id, debug_info, debug_abbrev, endian, has_type_units)?;
 
         macro_rules! update {
             ($target:ident += $source:expr) => {
@@ -523,18 +533,36 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
         }
 
         if !data.debug_rnglists.is_empty() {
-            let data = if let Some(ref referenced) =
-                gc_result.rewritten.as_ref().and(gc_result.referenced_rnglists.as_ref())
-            {
-                let rewritten = crate::gc::rewrite_rnglists(
-                    gimli::EndianSlice::new(&data.debug_rnglists, endian),
-                    referenced,
-                    &addr_resolver,
-                    dwo_id,
-                )?;
-                match rewritten {
-                    Some(v) => data.session.alloc_data(v),
-                    None => &data.debug_rnglists,
+            let data = if let Some(ref gc) = gc_result {
+                if let Some(ref referenced) =
+                    gc.rewritten.as_ref().and(gc.referenced_rnglists.as_ref())
+                {
+                    let dwo_id = match id {
+                        DwarfObject::Compilation(dwo_id) => dwo_id,
+                        _ => unreachable!(),
+                    };
+                    let (executable_data, dwo_data) =
+                        data.gc_data.get_data_for_dwo(dwo_id).unwrap();
+                    let addr_resolver = |index| {
+                        executable_data
+                            .0
+                            .debug_addr
+                            .get_address(dwo_data.addr_size, dwo_data.addr_base, index)
+                            .map(Some)
+                            .map_err(Into::into)
+                    };
+                    let rewritten = crate::gc::rewrite_rnglists(
+                        gimli::EndianSlice::new(&data.debug_rnglists, endian),
+                        referenced,
+                        &addr_resolver,
+                        dwo_id,
+                    )?;
+                    match rewritten {
+                        Some(v) => data.session.alloc_data(v),
+                        None => &data.debug_rnglists,
+                    }
+                } else {
+                    &data.debug_rnglists
                 }
             } else {
                 &data.debug_rnglists
@@ -542,17 +570,19 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
             update!(debug_rnglists += obj.append_to_debug_rnglists(data));
         }
         if !data.debug_loc.is_empty() {
-            let data = if let Some(ref remap) =
-                gc_result.rewritten.as_ref().and(gc_result.offset_remap.as_ref())
-            {
-                let patched = crate::gc::patch_debug_loc(
-                    gimli::EndianSlice::new(&data.debug_loc, endian),
-                    encoding,
-                    remap,
-                )?;
-                match patched {
-                    Some(v) => data.session.alloc_data(v),
-                    None => &data.debug_loc,
+            let data = if let Some(ref gc) = gc_result {
+                if let Some(ref remap) = gc.rewritten.as_ref().and(gc.offset_remap.as_ref()) {
+                    let patched = crate::gc::patch_debug_loc(
+                        gimli::EndianSlice::new(&data.debug_loc, endian),
+                        encoding,
+                        remap,
+                    )?;
+                    match patched {
+                        Some(v) => data.session.alloc_data(v),
+                        None => &data.debug_loc,
+                    }
+                } else {
+                    &data.debug_loc
                 }
             } else {
                 &data.debug_loc
@@ -561,17 +591,21 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
         }
         if !data.debug_loclists.is_empty() {
             let loclists_slice = gimli::EndianSlice::new(&data.debug_loclists, endian);
-            let remap = gc_result.rewritten.as_ref().and(gc_result.offset_remap.as_ref());
-
-            let data = if remap.is_some() {
-                let rewritten = crate::gc::rewrite_loclists(
-                    loclists_slice,
-                    gc_result.rewritten.as_ref().and(gc_result.referenced_loclists.as_ref()),
-                    remap
-                )?;
-                match rewritten {
-                    Some(v) => data.session.alloc_data(v),
-                    None => &data.debug_loclists,
+            let data = if let Some(ref gc) = gc_result {
+                let remap = gc.rewritten.as_ref().and(gc.offset_remap.as_ref());
+                if remap.is_some() {
+                    let rewritten =
+                        crate::gc::rewrite_loclists(
+                            loclists_slice,
+                            gc.rewritten.as_ref().and(gc.referenced_loclists.as_ref()),
+                            remap
+                        )?;
+                    match rewritten {
+                        Some(v) => data.session.alloc_data(v),
+                        None => &data.debug_loclists,
+                    }
+                } else {
+                    &data.debug_loclists
                 }
             } else {
                 &data.debug_loclists
@@ -579,16 +613,16 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
             update!(debug_loclists += obj.append_to_debug_loclists(data));
         }
 
-        // If a .debug_macro section is present, we cannot safely
-        // prune .debug_str_offsets since .debug_macro may reference
-        // entries we don't track.
         if has_debug_macro {
-            gc_result.referenced_str_offsets = None;
+            if let Some(ref mut gc) = gc_result {
+                gc.referenced_str_offsets = None;
+            }
         }
 
         if !data.debug_str_offsets.reader().is_empty() {
-            let filter =
-                gc_result.rewritten.as_ref().and(gc_result.referenced_str_offsets.as_ref());
+            let filter = gc_result
+                .as_ref()
+                .and_then(|gc| gc.rewritten.as_ref().and(gc.referenced_str_offsets.as_ref()));
             let remapped = string_table.remap_str_offsets_section(
                 data.debug_str,
                 data.debug_str_offsets,
@@ -599,7 +633,9 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
             update!(debug_str_offsets += obj.append_to_debug_str_offsets(remapped.slice()));
         }
 
-        Ok(gc_result.rewritten.map(|r| data.session.alloc_data(r.into_vec())))
+        Ok(gc_result
+            .and_then(|gc| gc.rewritten)
+            .map(|r| data.session.alloc_data(r.into_vec())))
     }
 
     pub(crate) fn new_gc(
@@ -899,7 +935,7 @@ impl<'file> InProgressDwarfPackage<'file> {
                     .ok_or(Error::EmptyUnit(id.index()))?;
 
                 let data = sess
-                    .maybe_gc(
+                    .emit_gc_sections(
                         id,
                         encoding,
                         data,
