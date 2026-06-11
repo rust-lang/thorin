@@ -499,7 +499,7 @@ where
         };
 
         let sess = self.sess;
-        let gc_data = self.gc_data.as_ref().unwrap();
+        let gc_data = self.gc_data.as_ref().ok_or(Error::GcNotInitialized)?;
         self.maybe_in_progress.as_mut().expect("`process_input_object` is broken").add_input_object(
             SessionHolder::new_gc(sess, gc_data),
             obj,
@@ -521,7 +521,7 @@ where
         path: &Path,
         missing_behaviour: MissingReferencedObjectBehaviour,
     ) -> Result<()> {
-        let dwarf = self.gc_data.as_ref().unwrap().get_data_for_executable(path)
+        let dwarf = self.gc_data.as_ref().ok_or(Error::GcNotInitialized)?.get_data_for_executable(path)
             .expect("All executables passed to add_gc_executable() must have preprocess_gc_executable() called first.")
             .0
             .clone();
