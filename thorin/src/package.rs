@@ -523,7 +523,9 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
         }
 
         if !data.debug_rnglists.is_empty() {
-            let data = if let Some(ref referenced) = gc_result.referenced_rnglists {
+            let data = if let Some(ref referenced) =
+                gc_result.rewritten.as_ref().and(gc_result.referenced_rnglists.as_ref())
+            {
                 let rewritten = crate::gc::rewrite_rnglists(
                     gimli::EndianSlice::new(&data.debug_rnglists, endian),
                     referenced,
@@ -540,7 +542,9 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
             update!(debug_rnglists += obj.append_to_debug_rnglists(data));
         }
         if !data.debug_loc.is_empty() {
-            let data = if let Some(ref remap) = gc_result.offset_remap {
+            let data = if let Some(ref remap) =
+                gc_result.rewritten.as_ref().and(gc_result.offset_remap.as_ref())
+            {
                 let patched = crate::gc::patch_debug_loc(
                     gimli::EndianSlice::new(&data.debug_loc, endian),
                     encoding,
@@ -557,19 +561,14 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
         }
         if !data.debug_loclists.is_empty() {
             let loclists_slice = gimli::EndianSlice::new(&data.debug_loclists, endian);
-            let remap = gc_result.offset_remap.as_ref();
+            let remap = gc_result.rewritten.as_ref().and(gc_result.offset_remap.as_ref());
 
-            let data = if let Some(ref referenced) = gc_result.referenced_loclists {
-                let rewritten =
-                    crate::gc::rewrite_loclists(loclists_slice, Some(referenced), remap)?;
-                match rewritten {
-                    Some(v) => data.session.alloc_data(v),
-                    None => &data.debug_loclists,
-                }
-            } else if remap.is_some() {
-                // Pruning disabled (sec_offset / type units), but expressions
-                // may still need patching after GC moved DIEs.
-                let rewritten = crate::gc::rewrite_loclists(loclists_slice, None, remap)?;
+            let data = if remap.is_some() {
+                let rewritten = crate::gc::rewrite_loclists(
+                    loclists_slice,
+                    gc_result.rewritten.as_ref().and(gc_result.referenced_loclists.as_ref()),
+                    remap
+                )?;
                 match rewritten {
                     Some(v) => data.session.alloc_data(v),
                     None => &data.debug_loclists,

@@ -1,0 +1,37 @@
+# Test that when all DIEs are live, GC does NOT compact rnglists or loclists
+# offset tables, even if there are orphan (unreferenced) list entries.
+#
+# The .dwo has 3 range lists and 3 location lists. Index 0 of each is
+# orphaned (not referenced by any DIE). The two subprograms use indices
+# 1 and 2. Since nothing is dead, debug_info passes through unchanged,
+# so the offset tables must also be preserved to keep the indices valid.
+
+# Assemble the .dwo (split debug info).
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-nothing-dead-orphan-list-dwo.s -o %t.dwo
+
+# Generate the exec assembly with the .dwo path substituted in, then assemble it.
+# RUN: sed 's|DWO_PATH|%t.dwo|' %p/inputs/gc-nothing-dead-orphan-list-exec.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t.o
+
+# With garbage collection both subprograms survive and offset tables are NOT compacted.
+# RUN: thorin --gc -e %t.o -o %t-gc.dwp
+# RUN: llvm-dwarfdump -debug-info -debug-rnglists -debug-loclists %t-gc.dwp | FileCheck %s
+
+# -- debug_info checks: both subprograms survive with original indices --
+# CHECK:        .debug_info.dwo contents:
+# CHECK:        DW_TAG_compile_unit
+# CHECK:          DW_TAG_subprogram
+# CHECK:            DW_AT_ranges	(indexed (0x1) rangelist =
+# CHECK:            DW_AT_name	("func_a")
+# CHECK:          DW_TAG_subprogram
+# CHECK:            DW_AT_ranges	(indexed (0x2) rangelist =
+# CHECK:            DW_AT_name	("func_b")
+# CHECK:          NULL
+# CHECK-NOT:    DW_TAG_subprogram
+
+# -- loclists: offset table is NOT compacted (still 3 entries) --
+# CHECK:        .debug_loclists.dwo contents:
+# CHECK:        offset_entry_count = 0x00000003
+
+# -- rnglists: offset table is NOT compacted (still 3 entries) --
+# CHECK:        .debug_rnglists.dwo contents:
+# CHECK:        offset_entry_count = 0x00000003
