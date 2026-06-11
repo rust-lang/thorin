@@ -110,6 +110,8 @@ pub enum Error {
     UnsupportedForm(u16),
     /// A section-absolute reference was found where not expected.
     UnexpectedSectionAbsoluteReference,
+    /// GC input object or executable added without prior `preprocess_gc_executable` call.
+    GcNotInitialized,
 
     /// Catch-all for `std::io::Error`.
     Io(std::io::Error),
@@ -164,6 +166,7 @@ impl StdError for Error {
             Error::MalformedDebugInfo => None,
             Error::UnsupportedForm(_) => None,
             Error::UnexpectedSectionAbsoluteReference => None,
+            Error::GcNotInitialized => None,
             Error::Io(transparent) => StdError::source(transparent.as_dyn_error()),
             Error::ObjectRead(transparent) => StdError::source(transparent.as_dyn_error()),
             Error::ObjectWrite(transparent) => StdError::source(transparent.as_dyn_error()),
@@ -271,6 +274,9 @@ impl fmt::Display for Error {
             }
             Error::UnexpectedSectionAbsoluteReference => {
                 write!(f, "A section-absolute reference was found in a .dwo file")
+            }
+            Error::GcNotInitialized => {
+                write!(f, "GC was requested but no executables were preprocessed")
             }
             Error::Io(e) => fmt::Display::fmt(e, f),
             Error::ObjectRead(e) => fmt::Display::fmt(e, f),
