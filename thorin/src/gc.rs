@@ -1749,11 +1749,11 @@ fn emit_attribute(
                         .range(old..)
                         .skip_while(|&(_, v)| v.1 > depth)
                         .next()
-                        .expect("DW_TAG_null should have been in the patch map.")
+                        .ok_or(Error::MalformedDebugInfo)?
                         .1
                          .0
                 } else {
-                    unreachable!();
+                    return Err(Error::MalformedDebugInfo);
                 }
             }
         };
