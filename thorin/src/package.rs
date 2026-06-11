@@ -715,6 +715,7 @@ impl<'file> InProgressDwarfPackage<'file> {
 
         // Iterate over sections rather than using `section_by_name` because sections can be
         // repeated.
+        let mut has_type_units = false;
         for section in input.sections() {
             match section.name() {
                 Ok(".debug_abbrev.dwo" | ".zdebug_abbrev.dwo") => {
@@ -783,6 +784,9 @@ impl<'file> InProgressDwarfPackage<'file> {
                         );
                     }
                 }
+                Ok(".debug_types.dwo" | ".zdebug_types.dwo") => {
+                    has_type_units = true;
+                }
                 _ => (),
             }
         }
@@ -813,7 +817,6 @@ impl<'file> InProgressDwarfPackage<'file> {
 
         let mut seen_debug_info = false;
         let mut seen_debug_types = false;
-        let mut has_type_units = false;
 
         for section in input.sections() {
             let data;
