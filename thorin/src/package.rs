@@ -475,7 +475,6 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
                 .0
                 .debug_addr
                 .get_address(dwo_data.addr_size, dwo_data.addr_base, index)
-                .map(Some)
                 .map_err(Into::into)
         };
 
@@ -548,7 +547,6 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
                             .0
                             .debug_addr
                             .get_address(dwo_data.addr_size, dwo_data.addr_base, index)
-                            .map(Some)
                             .map_err(Into::into)
                     };
                     let rewritten = crate::gc::rewrite_rnglists(
