@@ -387,6 +387,23 @@ pub(crate) fn rewrite_loclists(
 
     let raw = data.slice();
 
+    // When offset_entry_count == 0 (which is permitted by the DWARF 5 spec, as long
+    // as DW_FORM_sec_offset is used), there is no offset table to iterate.
+    // We can't prune individual lists, but we still need to patch CU-relative
+    // references in expressions.
+    if offset_entry_count == 0 {
+        if let Some(remap) = offset_remap {
+            let entry_data = &raw[header_size..];
+            let mut patched = raw.to_vec();
+            let did_patch =
+                patch_loclist_data(entry_data, endian, encoding, remap, &mut patched[header_size..])?;
+            if did_patch {
+                return Ok(Some(patched));
+            }
+        }
+        return Ok(None);
+    }
+
     let base = gimli::DebugLocListsBase(header_size);
 
     // Resolve all offsets and determine byte spans for each list. Lists in the
