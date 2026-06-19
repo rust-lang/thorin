@@ -1,0 +1,67 @@
+# Test garbage collection of a multi-CU `.dwp` input (DWARF 5).
+#
+# Two single-CU `.dwo` files are first packaged into one `.dwp`, which is then
+# re-packaged with `--gc`. The shared `.debug_loclists.dwo` section of the
+# `.dwp` is the concatenation of both CUs' contributions, so each CU must be
+# rewritten against its OWN sub-range: its referenced loclist indices and its
+# CU-relative expression references must not bleed into the other CU.
+#
+#   CU 0xbb (gc-compact-loclists-dwo.s): 3 location lists, only loclistx 1 is
+#     live. After GC the offset table compacts to 1 entry and the surviving
+#     variable's loclistx is renumbered 1 -> 0.
+#   CU 0xcc (gc-loclist-dwo.s): 1 location list whose expression is
+#     DW_OP_call4 <target>. The call keeps the tombstoned `target` subprogram
+#     alive, and the CU-relative call offset must be patched using 0xcc's own
+#     remap (not 0xbb's).
+
+# Assemble the two distinct `.dwo` files.
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-compact-loclists-dwo.s -o %t-bb.dwo
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-loclist-dwo.s -o %t-cc.dwo
+
+# Package them into a single multi-CU `.dwp` (no GC).
+# RUN: thorin %t-bb.dwo %t-cc.dwo -o %t-multi.dwp
+
+# Build the executable that supplies the GC address data for both CUs.
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-multi-dwp-v5-exec.s -o %t.o
+
+# Re-package the `.dwp` with garbage collection.
+# RUN: thorin --gc -e %t.o %t-multi.dwp -o %t-gc.dwp
+# RUN: llvm-dwarfdump -debug-info -debug-loclists %t-gc.dwp | FileCheck %s
+# RUN: llvm-dwarfdump -v -debug-cu-index %t-gc.dwp | FileCheck --check-prefix=INDEX %s
+
+# -- debug_info: dead DIEs removed in both CUs, live ones kept --
+# CHECK:        .debug_info.dwo contents:
+
+# CU 0xbb: only live_func survives, its loclistx renumbered to 0.
+# CHECK:        DWO_id = 0x00000000000000bb
+# CHECK-NOT:    dead_func
+# CHECK:          DW_TAG_subprogram
+# CHECK:            DW_AT_name	("live_func")
+# CHECK:            DW_TAG_variable
+# CHECK:              DW_AT_location	(indexed (0x0) loclist =
+
+# CU 0xcc: live_func survives; the DW_OP_call4 keeps `target` alive and its
+# CU-relative offset is patched to point within CU 0xcc.
+# CHECK:        DWO_id = 0x00000000000000cc
+# CHECK-NOT:    dead_func
+# CHECK:          DW_TAG_subprogram
+# CHECK:            DW_AT_name	("live_func")
+# CHECK:            DW_TAG_variable
+# CHECK:              DW_AT_location	(indexed (0x0) loclist =
+# CHECK:                 <default>: DW_OP_call4 0x28
+# CHECK:          DW_TAG_subprogram
+# CHECK:            DW_AT_name	("target")
+
+# -- loclists: each CU keeps its own compacted, single-entry offset table --
+# CHECK:        .debug_loclists.dwo contents:
+# CHECK:        offset_entry_count = 0x00000001
+# CHECK:            <default>: DW_OP_reg1 RDX
+# CHECK:        offset_entry_count = 0x00000001
+# CHECK:            <default>: DW_OP_call4 0x28
+
+# -- cu_index: the two CUs' LOCLISTS contributions are contiguous and disjoint
+#    (sizes recomputed from the rewritten per-CU bytes) --
+# INDEX:      .debug_cu_index contents:
+# INDEX:      LOCLISTS
+# INDEX-DAG:  0x00000000000000cc {{.*}} [0x00000014, 0x0000002c)
+# INDEX-DAG:  0x00000000000000bb {{.*}} [0x00000000, 0x00000014)
