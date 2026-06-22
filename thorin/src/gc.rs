@@ -54,7 +54,7 @@ pub(crate) struct GcResult {
 }
 
 /// Returns `true` if the given address is a tombstone value.
-fn is_tombstone(addr: u64, address_size: u8) -> bool {
+pub(crate) fn is_tombstone(addr: u64, address_size: u8) -> bool {
     let negative_one = match address_size {
         4 => 0xffff_ffff_u64,
         8 => 0xffff_ffff_ffff_ffff_u64,
@@ -175,14 +175,14 @@ fn reassemble_offset_table_section(
 ///
 /// Returns `None` if nothing changed (caller should use the original data).
 /// Returns `Some(vec)` with the new section bytes if anything was modified.
-pub(crate) fn rewrite_rnglists<AddrResolver>(
+pub(crate) fn rewrite_rnglists<IsAddrLive>(
     data: gimli::EndianSlice<'_, RunTimeEndian>,
     referenced_indices: &BTreeSet<u64>,
-    addr_resolver: &AddrResolver,
+    is_addr_live: &IsAddrLive,
     dwo_id: DwoId,
 ) -> Result<Option<Vec<u8>>>
 where
-    AddrResolver: Fn(DebugAddrIndex<usize>) -> Result<u64>,
+    IsAddrLive: Fn(DebugAddrIndex<usize>) -> Result<bool>,
 {
     if data.is_empty() {
         return Ok(None);
@@ -225,7 +225,7 @@ where
         while let Some(entry) = raw_iter.next()? {
             match entry {
                 gimli::RawRngListEntry::BaseAddressx { addr } => {
-                    if is_tombstone(addr_resolver(addr)?, address_size) {
+                    if !is_addr_live(addr)? {
                         base_tombstoned = true;
                         any_removed = true;
                         trace!(list_idx, "removing tombstoned base_addressx idx={}", addr.0);
@@ -254,7 +254,7 @@ where
                     }
                 }
                 gimli::RawRngListEntry::StartxEndx { begin, .. } => {
-                    if is_tombstone(addr_resolver(begin)?, address_size) {
+                    if !is_addr_live(begin)? {
                         any_removed = true;
                         trace!(list_idx, "removing tombstoned startx_endx");
                     } else {
@@ -262,7 +262,7 @@ where
                     }
                 }
                 gimli::RawRngListEntry::StartxLength { begin, .. } => {
-                    if is_tombstone(addr_resolver(begin)?, address_size) {
+                    if !is_addr_live(begin)? {
                         any_removed = true;
                         trace!(list_idx, "removing tombstoned startx_length");
                     } else {
@@ -395,8 +395,13 @@ pub(crate) fn rewrite_loclists(
         if let Some(remap) = offset_remap {
             let entry_data = &raw[header_size..];
             let mut patched = raw.to_vec();
-            let did_patch =
-                patch_loclist_data(entry_data, endian, encoding, remap, &mut patched[header_size..])?;
+            let did_patch = patch_loclist_data(
+                entry_data,
+                endian,
+                encoding,
+                remap,
+                &mut patched[header_size..],
+            )?;
             if did_patch {
                 return Ok(Some(patched));
             }
@@ -848,16 +853,16 @@ fn ranges_has_live_entry(
 /// Returns `Ok(true)` if at least one entry resolves to a non-tombstoned address,
 /// `Ok(false)` if all entries are tombstoned or the list was empty.
 /// Conservatively returns `Ok(true)` if resolution fails.
-fn rnglist_has_live_entry<AddrResolver>(
+fn rnglist_has_live_entry<IsAddrLive>(
     range_lists: &gimli::RangeLists<Relocate<gimli::EndianSlice<'_, RunTimeEndian>>>,
     base: gimli::DebugRngListsBase<usize>,
     index: gimli::DebugRngListsIndex<usize>,
     encoding: gimli::Encoding,
-    addr_resolver: &AddrResolver,
+    is_addr_live: &IsAddrLive,
     dwo_id: DwoId,
 ) -> Result<bool>
 where
-    AddrResolver: Fn(DebugAddrIndex<usize>) -> Result<u64>,
+    IsAddrLive: Fn(DebugAddrIndex<usize>) -> Result<bool>,
 {
     // Resolve the rnglistx index to an absolute section offset.
     let Ok(offset) = range_lists.get_offset(encoding, base, index) else {
@@ -875,7 +880,7 @@ where
     while let Some(entry) = raw_iter.next()? {
         match entry {
             gimli::RawRngListEntry::BaseAddressx { addr } => {
-                base_tombstoned = is_tombstone(addr_resolver(addr)?, encoding.address_size);
+                base_tombstoned = !is_addr_live(addr)?;
             }
             gimli::RawRngListEntry::BaseAddress { addr } => {
                 base_tombstoned = is_tombstone(addr, encoding.address_size);
@@ -888,7 +893,7 @@ where
             }
             gimli::RawRngListEntry::StartxEndx { begin, .. }
             | gimli::RawRngListEntry::StartxLength { begin, .. } => {
-                if !is_tombstone(addr_resolver(begin)?, encoding.address_size) {
+                if is_addr_live(begin)? {
                     return Ok(true);
                 }
             }
@@ -909,7 +914,7 @@ where
 /// `attrs` are the raw `(name, form, value)` records of the DIE. Returns `Ok(true)` if the DIE
 /// should be treated as an unconditionally live root. Conservatively returns `true` when liveness
 /// cannot be determined.
-fn is_root<AddrResolver>(
+fn is_root<IsAddrLive>(
     tag: gimli::DwTag,
     attrs: &[(
         gimli::DwAt,
@@ -918,12 +923,12 @@ fn is_root<AddrResolver>(
     )],
     range_lists: &gimli::RangeLists<Relocate<gimli::EndianSlice<'_, RunTimeEndian>>>,
     rnglists_base: gimli::DebugRngListsBase<usize>,
-    addr_resolver: &AddrResolver,
+    is_addr_live: &IsAddrLive,
     dwo_id: DwoId,
     encoding: gimli::Encoding,
 ) -> Result<bool>
 where
-    AddrResolver: Fn(DebugAddrIndex<usize>) -> Result<u64>,
+    IsAddrLive: Fn(DebugAddrIndex<usize>) -> Result<bool>,
 {
     match tag {
         gimli::DW_TAG_subprogram => {
@@ -931,7 +936,7 @@ where
             for (name, _, value) in attrs {
                 if *name == gimli::DW_AT_low_pc {
                     if let gimli::AttributeValue::DebugAddrIndex(idx) = value {
-                        if !is_tombstone(addr_resolver(*idx)?, encoding.address_size) {
+                        if is_addr_live(*idx)? {
                             return Ok(true);
                         }
                     } else if let gimli::AttributeValue::Addr(addr) = value {
@@ -954,7 +959,7 @@ where
                             rnglists_base,
                             *idx,
                             encoding,
-                            addr_resolver,
+                            is_addr_live,
                             dwo_id,
                         );
                     } else if let gimli::AttributeValue::SecOffset(offset) = value {
@@ -976,7 +981,7 @@ where
             for (name, _, value) in attrs {
                 if *name == gimli::DW_AT_location {
                     if let gimli::AttributeValue::Exprloc(expr) = value {
-                        if location_expr_live(*expr, addr_resolver, encoding)? {
+                        if location_expr_live(*expr, is_addr_live, encoding)? {
                             return Ok(true);
                         }
                     }
@@ -993,13 +998,13 @@ where
 }
 
 /// Examine a variable's location expression for `DW_OP_addrx` / `DW_OP_GNU_addr_index`.
-fn location_expr_live<AddrResolver>(
+fn location_expr_live<IsAddrLive>(
     expression: gimli::Expression<gimli::EndianSlice<'_, RunTimeEndian>>,
-    addr_resolver: &AddrResolver,
+    is_addr_live: &IsAddrLive,
     encoding: gimli::Encoding,
 ) -> Result<bool>
 where
-    AddrResolver: Fn(DebugAddrIndex<usize>) -> Result<u64>,
+    IsAddrLive: Fn(DebugAddrIndex<usize>) -> Result<bool>,
 {
     let mut iter = expression.operations(encoding);
     let mut saw_addrx = false;
@@ -1007,7 +1012,7 @@ where
     while let Some(op) = iter.next()? {
         if let gimli::Operation::AddressIndex { index } = op {
             saw_addrx = true;
-            if !is_tombstone(addr_resolver(index)?, encoding.address_size) {
+            if is_addr_live(index)? {
                 any_live = true;
             }
         }
@@ -1148,17 +1153,17 @@ fn scan_loclist_for_refs(
 /// Garbage-collect dead DIEs from a `.debug_info.dwo` compilation unit.
 ///
 /// See the module level comment for an explanation of the approach.
-pub(crate) fn gc_debug_info<AddrResolver>(
+pub(crate) fn gc_debug_info<IsAddrLive>(
     debug_info: gimli::DebugInfo<gimli::EndianSlice<'_, RunTimeEndian>>,
     debug_abbrev: gimli::DebugAbbrev<gimli::EndianSlice<'_, RunTimeEndian>>,
     loc_lists: gimli::LocationLists<gimli::EndianSlice<'_, RunTimeEndian>>,
     range_lists: gimli::RangeLists<Relocate<gimli::EndianSlice<'_, RunTimeEndian>>>,
-    addr_resolver: AddrResolver,
+    is_addr_live: IsAddrLive,
     dwo_id: DwoId,
     has_type_units: bool,
 ) -> Result<GcResult>
 where
-    AddrResolver: Fn(DebugAddrIndex<usize>) -> Result<u64>,
+    IsAddrLive: Fn(DebugAddrIndex<usize>) -> Result<bool>,
 {
     debug!(?dwo_id, has_type_units, "gc_debug_info: starting GC pass");
 
@@ -1258,7 +1263,7 @@ where
 
         // Identify roots.
         let mut liveness = Liveness::Dead;
-        if is_root(tag, &attrs, &range_lists, rnglists_base, &addr_resolver, dwo_id, encoding)? {
+        if is_root(tag, &attrs, &range_lists, rnglists_base, &is_addr_live, dwo_id, encoding)? {
             liveness = Liveness::Live;
             worklist.push(index);
         }

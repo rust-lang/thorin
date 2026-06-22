@@ -86,6 +86,7 @@ pub enum Error {
     /// Section not found in unit's row in index, i.e. a DWARF package contains a section but its
     /// index doesn't record contributions to it.
     SectionNotInRow,
+    ContributionOutOfBounds(crate::index::Contribution, usize),
     /// Compilation unit in input DWARF object has no content.
     EmptyUnit(u64),
     /// Found multiple `.debug_info.dwo` sections.
@@ -112,6 +113,13 @@ pub enum Error {
     UnexpectedSectionAbsoluteReference,
     /// GC input object or executable added without prior `preprocess_gc_executable` call.
     GcNotInitialized,
+    /// A `.dwo` is referenced by multiple executables that supply DWARF4 `.debug_ranges`.
+    ///
+    /// DWARF4 range lists hold raw addresses that live in the linked executable.
+    /// When several executables reference the same `.dwo`, each has its own (independently
+    /// tombstoned) `.debug_ranges`, but the GC currently only supports consulting one
+    /// of them. Proceeding could prune a range list still live in a different executable.
+    GcSharedDwarf4Ranges(crate::package::DwoId),
 
     /// Catch-all for `std::io::Error`.
     Io(std::io::Error),
@@ -154,6 +162,7 @@ impl StdError for Error {
             Error::UnitNotInIndex(_) => None,
             Error::RowNotInIndex(source, _) => Some(source.as_dyn_error()),
             Error::SectionNotInRow => None,
+            Error::ContributionOutOfBounds(..) => None,
             Error::EmptyUnit(_) => None,
             Error::MultipleDebugInfoSection => None,
             Error::MultipleDebugTypesSection => None,
@@ -167,6 +176,7 @@ impl StdError for Error {
             Error::UnsupportedForm(_) => None,
             Error::UnexpectedSectionAbsoluteReference => None,
             Error::GcNotInitialized => None,
+            Error::GcSharedDwarf4Ranges(_) => None,
             Error::Io(transparent) => StdError::source(transparent.as_dyn_error()),
             Error::ObjectRead(transparent) => StdError::source(transparent.as_dyn_error()),
             Error::ObjectWrite(transparent) => StdError::source(transparent.as_dyn_error()),
@@ -245,6 +255,14 @@ impl fmt::Display for Error {
                 write!(f, "Row {0} found in index's hash table not present in index", row)
             }
             Error::SectionNotInRow => write!(f, "Section not found in unit's row in index"),
+            Error::ContributionOutOfBounds(contribution, section_len) => {
+                write!(
+                    f,
+                    "Index contribution at offset 0x{:08x} with size 0x{:x} extends beyond section \
+                     of length 0x{:x}",
+                    contribution.offset.0, contribution.size, section_len
+                )
+            }
             Error::EmptyUnit(unit) => {
                 write!(f, "Unit 0x{:08x} in input DWARF object with no data", unit)
             }
@@ -277,6 +295,13 @@ impl fmt::Display for Error {
             }
             Error::GcNotInitialized => {
                 write!(f, "GC was requested but no executables were preprocessed")
+            }
+            Error::GcSharedDwarf4Ranges(dwo_id) => {
+                write!(
+                    f,
+                    "DWARF4 .debug_ranges for {dwo_id:?} is supplied by multiple executables; \
+                     cannot safely GC"
+                )
             }
             Error::Io(e) => fmt::Display::fmt(e, f),
             Error::ObjectRead(e) => fmt::Display::fmt(e, f),
