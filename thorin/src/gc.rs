@@ -922,6 +922,7 @@ fn is_root<IsAddrLive>(
         gimli::AttributeValue<gimli::EndianSlice<'_, RunTimeEndian>>,
     )],
     range_lists: &gimli::RangeLists<Relocate<gimli::EndianSlice<'_, RunTimeEndian>>>,
+    ranges_base: gimli::DebugRngListsBase<usize>,
     rnglists_base: gimli::DebugRngListsBase<usize>,
     is_addr_live: &IsAddrLive,
     dwo_id: DwoId,
@@ -963,9 +964,11 @@ where
                             dwo_id,
                         );
                     } else if let gimli::AttributeValue::SecOffset(offset) = value {
+                        // DWARF4 `.debug_ranges` sec_offsets are relative to the skeleton's
+                        // `DW_AT_GNU_ranges_base` within the executable's `.debug_ranges`.
                         return ranges_has_live_entry(
                             range_lists,
-                            gimli::RangeListsOffset(*offset),
+                            gimli::RangeListsOffset(ranges_base.0 + *offset),
                             encoding,
                             dwo_id,
                         );
@@ -1158,6 +1161,7 @@ pub(crate) fn gc_debug_info<IsAddrLive>(
     debug_abbrev: gimli::DebugAbbrev<gimli::EndianSlice<'_, RunTimeEndian>>,
     loc_lists: gimli::LocationLists<gimli::EndianSlice<'_, RunTimeEndian>>,
     range_lists: gimli::RangeLists<Relocate<gimli::EndianSlice<'_, RunTimeEndian>>>,
+    ranges_base: gimli::DebugRngListsBase<usize>,
     is_addr_live: IsAddrLive,
     dwo_id: DwoId,
     has_type_units: bool,
@@ -1263,7 +1267,16 @@ where
 
         // Identify roots.
         let mut liveness = Liveness::Dead;
-        if is_root(tag, &attrs, &range_lists, rnglists_base, &is_addr_live, dwo_id, encoding)? {
+        if is_root(
+            tag,
+            &attrs,
+            &range_lists,
+            ranges_base,
+            rnglists_base,
+            &is_addr_live,
+            dwo_id,
+            encoding,
+        )? {
             liveness = Liveness::Live;
             worklist.push(index);
         }

@@ -607,6 +607,7 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
             .position(|(exec, _)| !exec.0.ranges.debug_ranges().reader().is_empty())
             .unwrap_or(0);
         let ranges_executable_data = &exec_entries[ranges_idx].0;
+        let ranges_base = exec_entries[ranges_idx].1.ranges_base;
 
         let gc_result = crate::gc::gc_debug_info(
             gimli::DebugInfo::new(debug_info, endian),
@@ -630,6 +631,7 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
                 let reader = section;
                 gimli::DebugRngLists::from(Relocate { relocations, section, reader })
             }),
+            ranges_base,
             is_addr_live,
             dwo_id,
             has_type_units,

@@ -7,6 +7,9 @@
 #     subprogram "mixed_func": DW_AT_ranges = sec_offset 0x50 (one tombstoned + one live)
 #     subprogram "live_func": DW_AT_low_pc = GNU_addr_index 0 (live)
 #
+# These sec_offsets are relative to the skeleton's DW_AT_GNU_ranges_base; the absolute
+# offsets into the executable's .debug_ranges are ranges_base (0x40) plus these values.
+#
 # The range data lives in the skeleton executable's .debug_ranges section,
 # not in a .dwo section (DWARF4 has no .debug_ranges.dwo).
 #

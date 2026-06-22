@@ -8,7 +8,7 @@ use std::{
     rc::Rc,
 };
 
-use gimli::{EndianSlice, Reader, ReaderOffset, UnitType};
+use gimli::{EndianSlice, Reader, UnitType};
 use hashbrown::HashMap;
 use object::{write::Object as WritableObject, FileKind, Object, ObjectSection};
 use tracing::{debug, trace};
@@ -67,6 +67,7 @@ struct ExecutableData<'session>(
 struct DwoData {
     addr_size: u8,
     addr_base: gimli::DebugAddrBase<usize>,
+    ranges_base: gimli::DebugRngListsBase<usize>,
 }
 
 #[derive(Default)]
@@ -411,31 +412,33 @@ where
                     let mut cursor = unit.header.entries(&unit.abbreviations);
                     cursor.next_dfs()?;
                     if let Some(root) = cursor.current() {
-                        if let Some(gimli::AttributeValue::DebugAddrBase(base)) =
+                        if let Some(gimli::AttributeValue::DebugAddrBase(addr_base)) =
                             root.attr_value(gimli::DW_AT_addr_base)
                         {
-                            let addr_base = base.0.into_u64();
                             let addr_size = header.address_size();
                             trace!(
                                 ?target,
                                 addr_size,
-                                addr_base,
-                                "found addr_base for DWARF5 skeleton CU"
+                                ?addr_base,
+                                "found dwo data for DWARF5 skeleton CU"
                             );
                             gc_data.put_data_for_dwo(
                                 path,
                                 target,
                                 DwoData {
                                     addr_size,
-                                    addr_base: gimli::DebugAddrBase(addr_base as usize),
+                                    addr_base,
+                                    // Always 0 for DWARF 5.
+                                    ranges_base: gimli::DebugRngListsBase(0),
                                 },
                             );
                         }
                     }
                 }
                 UnitType::Compilation => {
-                    // DWARF4 GNU extension: skeleton units have DW_AT_GNU_dwo_id and
-                    // DW_AT_GNU_addr_base. If no addr base is present, default to 0.
+                    // DWARF4 GNU extension: skeleton units have DW_AT_GNU_dwo_id,
+                    // DW_AT_GNU_addr_base, and DW_AT_GNU_ranges_base. If no addr
+                    // or ranges base is present, default to 0.
                     let mut cursor = unit.header.entries(&unit.abbreviations);
                     cursor.next_dfs()?;
                     if let Some(root) = cursor.current() {
@@ -450,22 +453,34 @@ where
                                     let gimli::AttributeValue::DebugAddrBase(base) = v else {
                                         return None;
                                     };
-                                    Some(base.0.into_u64())
+                                    Some(base)
                                 })
-                                .unwrap_or_default();
+                                .unwrap_or(gimli::DebugAddrBase(0));
+                            // DW_AT_GNU_ranges_base defaults to 0 if absent.
+                            let ranges_base = root
+                                .attr_value(gimli::constants::DW_AT_GNU_ranges_base)
+                                .and_then(|v| match v {
+                                    gimli::AttributeValue::DebugRngListsBase(base) => {
+                                        Some(base)
+                                    }
+                                    _ => None,
+                                })
+                                .unwrap_or(gimli::DebugRngListsBase(0));
                             let addr_size = header.address_size();
                             trace!(
                                 ?target,
-                                addr_base,
+                                ?addr_base,
+                                ?ranges_base,
                                 addr_size,
-                                "found addr_base for DWARF4 GNU skeleton CU"
+                                "found dwo data for DWARF4 GNU skeleton CU"
                             );
                             gc_data.put_data_for_dwo(
                                 path,
                                 target,
                                 DwoData {
                                     addr_size,
-                                    addr_base: gimli::DebugAddrBase(addr_base as usize),
+                                    addr_base,
+                                    ranges_base,
                                 },
                             );
                         }
