@@ -1,0 +1,50 @@
+# Test that when two executables reference the same .dwo (same DWO ID),
+# liveness is computed as the union across both executables. A DIE that
+# is live in *either* executable must survive GC.
+#
+# Setup: one .dwo with two subprograms (func_a at addrx 0, func_b at
+# addrx 1). Exec1 has func_a live and func_b tombstoned; exec2 has the
+# reverse. Both subprograms should survive.
+#
+# Bug #8: put_data_for_dwo is last-wins, so only the second executable's
+# addresses are used. func_a (live only in exec1) gets incorrectly GC'd.
+
+# Assemble the .dwo.
+# RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-duplicate-dwoid-dwo.s -o %t.dwo
+
+# Assemble both executables, each pointing to the same .dwo.
+# RUN: sed 's|DWO_PATH|%t.dwo|' %p/inputs/gc-duplicate-dwoid-exec1.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t-exec1.o
+# RUN: sed 's|DWO_PATH|%t.dwo|' %p/inputs/gc-duplicate-dwoid-exec2.s | llvm-mc --triple=x86_64-unknown-linux --filetype=obj -o %t-exec2.o
+
+# With only exec1: func_a survives, func_b is GC'd.
+# RUN: thorin --gc -e %t-exec1.o -o %t-exec1.dwp
+# RUN: llvm-dwarfdump -debug-info %t-exec1.dwp | FileCheck --check-prefix=EXEC1 %s
+
+# EXEC1:       .debug_info.dwo contents:
+# EXEC1:       DW_TAG_compile_unit
+# EXEC1:       DW_TAG_subprogram
+# EXEC1:         DW_AT_name ("func_a")
+# EXEC1:       NULL
+# EXEC1-NOT:   DW_TAG_subprogram
+
+# With only exec2: func_b survives, func_a is GC'd.
+# RUN: thorin --gc -e %t-exec2.o -o %t-exec2.dwp
+# RUN: llvm-dwarfdump -debug-info %t-exec2.dwp | FileCheck --check-prefix=EXEC2 %s
+
+# EXEC2:       .debug_info.dwo contents:
+# EXEC2:       DW_TAG_compile_unit
+# EXEC2:       DW_TAG_subprogram
+# EXEC2:         DW_AT_name ("func_b")
+# EXEC2:       NULL
+# EXEC2-NOT:   DW_TAG_subprogram
+
+# With both executables: both subprograms must survive (union of liveness).
+# RUN: thorin --gc -e %t-exec1.o -e %t-exec2.o -o %t-both.dwp
+# RUN: llvm-dwarfdump -debug-info %t-both.dwp | FileCheck --check-prefix=BOTH %s
+
+# BOTH:        .debug_info.dwo contents:
+# BOTH:        DW_TAG_compile_unit
+# BOTH:        DW_TAG_subprogram
+# BOTH:          DW_AT_name ("func_a")
+# BOTH:        DW_TAG_subprogram
+# BOTH:          DW_AT_name ("func_b")

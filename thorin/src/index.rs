@@ -48,8 +48,8 @@ fn bucket<B: Bucketable + fmt::Debug>(elements: &[B]) -> Vec<u32> {
 }
 
 /// New-type'd offset into a section of a compilation/type unit's contribution.
-#[derive(Copy, Clone, Eq, Hash, PartialEq)]
-pub(crate) struct ContributionOffset(pub(crate) u64);
+#[derive(Copy, Clone, Default, Eq, Hash, PartialEq)]
+pub struct ContributionOffset(pub(crate) u64);
 
 impl fmt::Debug for ContributionOffset {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -61,12 +61,47 @@ impl fmt::Debug for ContributionOffset {
 type ContributionSize = u64;
 
 /// Contribution to a section - offset and size.
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct Contribution {
+#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq)]
+pub struct Contribution {
     /// Offset of this contribution into its containing section.
     pub(crate) offset: ContributionOffset,
     /// Size of this contribution in its containing section.
     pub(crate) size: ContributionSize,
+}
+
+impl Contribution {
+    /// Byte range of this contribution within its containing section, suitable for slicing.
+    pub(crate) fn range(&self) -> std::ops::Range<usize> {
+        let start = self.offset.0 as usize;
+        start..start + self.size as usize
+    }
+}
+
+impl From<(u32, u32)> for Contribution {
+    fn from(v: (u32, u32)) -> Contribution {
+        Contribution {
+            offset: ContributionOffset(v.0 as _),
+            size: v.1 as _,
+        }
+    }
+}
+
+impl From<(u64, u64)> for Contribution {
+    fn from(v: (u64, u64)) -> Contribution {
+        Contribution {
+            offset: ContributionOffset(v.0),
+            size: v.1,
+        }
+    }
+}
+
+impl From<(usize, usize)> for Contribution {
+    fn from(v: (usize, usize)) -> Contribution {
+        Contribution {
+            offset: ContributionOffset(v.0 as _),
+            size: v.1 as _,
+        }
+    }
 }
 
 /// Populated columns in the `.debug_cu_index` or `.debug_tu_index` section.

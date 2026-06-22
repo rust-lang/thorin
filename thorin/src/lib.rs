@@ -69,15 +69,10 @@ struct DwoData {
     addr_base: gimli::DebugAddrBase<usize>,
 }
 
+#[derive(Default)]
 struct GarbageCollectionData<'session> {
     executable_data: HashMap<PathBuf, ExecutableData<'session>>,
-    dwo_data: HashMap<DwoId, (PathBuf, DwoData)>,
-}
-
-impl Default for GarbageCollectionData<'_> {
-    fn default() -> Self {
-        Self { executable_data: Default::default(), dwo_data: Default::default() }
-    }
+    dwo_data: HashMap<DwoId, Vec<(PathBuf, DwoData)>>,
 }
 
 impl<'session> GarbageCollectionData<'session> {
@@ -85,7 +80,7 @@ impl<'session> GarbageCollectionData<'session> {
         self.executable_data.insert(path.to_path_buf(), data);
     }
     fn put_data_for_dwo(&mut self, executable_path: &'_ Path, dwo_id: DwoId, data: DwoData) {
-        self.dwo_data.entry(dwo_id).insert((executable_path.to_path_buf(), data));
+        self.dwo_data.entry(dwo_id).or_default().push((executable_path.to_path_buf(), data));
     }
     fn get_data_for_executable(&self, path: &'_ Path) -> Option<&ExecutableData<'session>> {
         self.executable_data.get(path)
@@ -93,10 +88,18 @@ impl<'session> GarbageCollectionData<'session> {
     fn get_data_for_dwo(
         &self,
         dwo_id: DwoId,
-    ) -> Option<(&ExecutableData<'session>, &DwoData)> {
-        let (ref executable_path, ref dwo_data) = self.dwo_data.get(&dwo_id)?;
-        let executable_data = self.executable_data.get(executable_path)?;
-        Some((executable_data, dwo_data))
+    ) -> Option<Vec<(&ExecutableData<'session>, &DwoData)>> {
+        let entries = self.dwo_data.get(&dwo_id)?;
+        let r = entries
+            .iter()
+            .filter_map(|(path, dwo_data)| {
+                self.executable_data.get(path).map(|exec| (exec, dwo_data))
+            })
+            .collect::<Vec<_>>();
+        if r.is_empty() {
+            return None;
+        }
+        Some(r)
     }
 }
 

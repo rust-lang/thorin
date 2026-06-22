@@ -1,6 +1,10 @@
-use std::{borrow::Cow, collections::HashSet, fmt};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    fmt,
+};
 
-use gimli::{Encoding, RunTimeEndian, Section, UnitHeader, UnitIndex, UnitType};
+use gimli::{Encoding, Reader, RunTimeEndian, Section, UnitHeader, UnitIndex, UnitType};
 use object::{
     write::{Object as WritableObject, SectionId},
     BinaryFormat, Object, ObjectSection, SectionKind,
@@ -10,7 +14,10 @@ use tracing::debug;
 use crate::{
     error::{Error, Result},
     ext::{CompressedDataRangeExt, EndianityExt, IndexSectionExt, PackageFormatExt},
-    index::{write_index, Bucketable, Contribution, ContributionOffset, IndexEntry},
+    gc::is_tombstone,
+    index::{
+        write_index, Bucketable, Contribution, ContributionOffset, IndexEntry,
+    },
     relocate::{Relocate, RelocationMap},
     strings::PackageStringTable,
     GarbageCollectionData, Session,
@@ -230,20 +237,12 @@ where
         match (index, contribution) {
             // dwp input with section
             (Some(index), Some(contribution)) => {
-                let idx = identifier.index();
-                let row_id = index.find(idx).ok_or(Error::UnitNotInIndex(idx))?;
-                let section = index
-                    .sections(row_id)
-                    .map_err(|e| Error::RowNotInIndex(e, row_id))?
-                    .find(|index_section| index_section.section == target_section_id)
+                let section = find_index_section(index, identifier, target_section_id)?
                     .ok_or(Error::SectionNotInRow)?;
                 let adjusted_offset: u64 = contribution.offset.0 + *adjustment;
                 *adjustment += section.size as u64;
 
-                Ok(Some(Contribution {
-                    offset: ContributionOffset(adjusted_offset),
-                    size: section.size as u64,
-                }))
+                Ok(Some(Contribution::from((adjusted_offset, section.size as u64))))
             }
             // dwp input without section
             (Some(_) | None, None) => Ok(contribution),
@@ -251,6 +250,69 @@ where
             (None, Some(_)) => Ok(contribution),
         }
     }
+}
+
+/// Look up a unit's entry for the specified section in a `UnitIndex`.
+fn find_index_section<R: gimli::Reader>(
+    index: &UnitIndex<R>,
+    id: DwarfObject,
+    section_id: gimli::IndexSectionId,
+) -> Result<Option<gimli::UnitIndexSection>> {
+    let idx = id.index();
+    let row_id = index.find(idx).ok_or(Error::UnitNotInIndex(idx))?;
+    let section = index
+        .sections(row_id)
+        .map_err(|e| Error::RowNotInIndex(e, row_id))?
+        .find(|index_section| index_section.section == section_id);
+    Ok(section)
+}
+
+/// Resolve a unit's [`Contribution`] within a shared input section.
+///
+/// For `.dwp` inputs the range comes from the unit index. For `.dwo` inputs
+/// (no index) the unit's contribution is the whole section, so a `Contribution`
+/// covering the entire section is returned. This mirrors the per-unit slicing
+/// done by `create_contribution_adjustor`, but is used by GC to rewrite each
+/// unit's sub-range of the section independently.
+fn unit_section_range<R: gimli::Reader>(
+    index: Option<&UnitIndex<R>>,
+    id: DwarfObject,
+    section_id: gimli::IndexSectionId,
+    whole_len: usize,
+) -> Result<Contribution> {
+    let Some(index) = index else {
+        return Ok(Contribution::from((0, whole_len)));
+    };
+
+    let section = find_index_section(index, id, section_id)?;
+    let contribution = section
+        .map_or(Contribution::default(), |s| {
+            Contribution::from((s.offset as usize, s.size as usize))
+        });
+    // The offset and size come straight from the (possibly malformed) input index, so
+    // validate them against the real section length before they are used to slice it.
+    if contribution
+        .offset
+        .0
+        .checked_add(contribution.size)
+        .is_none_or(|end| end > whole_len as u64) {
+        return Err(Error::ContributionOutOfBounds(contribution, whole_len));
+    }
+    Ok(contribution)
+}
+
+/// Per-CU data accumulated during the first pass and carried forward
+/// to output the shared sections.
+///
+/// `entry` is built incrementally: the non-shared fields are set during the
+/// first pass, and the four shared fields (`debug_loc`, `debug_loclists`,
+/// `debug_rnglists`, `debug_str_offsets`) are either filled in directly by
+/// `emit_gc_shared_sections` (GC no-type-units path) or computed from
+/// adjustors in the second pass (all other paths).
+struct PendingEntry {
+    entry: IndexEntry,
+    /// GC result for this unit, used to rewrite shared sections.
+    gc_result: Option<crate::gc::GcResult>,
 }
 
 /// Wrapper around `object::write::Object` that keeps track of the section indexes relevant to
@@ -305,10 +367,7 @@ macro_rules! generate_append_for {
                 // FIXME: correct alignment
                 let offset = self.obj.append_section_data(id, data, 1);
                 debug!(?offset, ?data);
-                Some(Contribution {
-                    offset: ContributionOffset(offset),
-                    size: data.len().try_into().expect("data size larger than u64"),
-                })
+                Some(Contribution::from((offset, data.len().try_into().expect("data size larger than u64"))))
             }
         )+
     };
@@ -455,8 +514,9 @@ where
 impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
     SessionHolder<'input, 'gc, 'session, S>
 {
-    fn maybe_gc(
+    fn maybe_gc<R: gimli::Reader>(
         data: &GcSessionData<'input, 'gc, 'session, S>,
+        cu_index: Option<&UnitIndex<R>>,
         id: DwarfObject,
         debug_info: &'input [u8],
         debug_abbrev: &gimli::DebugAbbrev<gimli::EndianSlice<'input, RunTimeEndian>>,
@@ -466,32 +526,111 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
         let DwarfObject::Compilation(dwo_id) = id else {
             return Ok(None);
         };
-        let Some((executable_data, dwo_data)) = data.gc_data.get_data_for_dwo(dwo_id) else {
+        let Some(exec_entries) = data.gc_data.get_data_for_dwo(dwo_id) else {
             return Ok(None);
         };
+        debug_assert!(!exec_entries.is_empty());
 
-        let addr_resolver = |index| {
-            executable_data
-                .0
-                .debug_addr
-                .get_address(dwo_data.addr_size, dwo_data.addr_base, index)
-                .map_err(Into::into)
+        // DWARF4 range lists hold raw addresses that live in the executable's
+        // `.debug_ranges`, and we consult a single executable's copy (see
+        // `ranges_executable_data` below). That is the correct union only when at most one
+        // executable actually carries `.debug_ranges` for this `.dwo`: the empty ones
+        // contribute no range liveness, and `.debug_addr` is unioned separately by
+        // `is_addr_live`. If two or more executables supply non-empty `.debug_ranges`, we
+        // would have to union across all of them (as we do for `.debug_addr`), which is not
+        // implemented; rather than risk pruning a range list still live in another
+        // executable, error out.
+        let execs_with_ranges = exec_entries
+            .iter()
+            .filter(|(exec, _)| !exec.0.ranges.debug_ranges().reader().is_empty())
+            .count();
+        if execs_with_ranges > 1 {
+            return Err(crate::error::Error::GcSharedDwarf4Ranges(dwo_id));
+        }
+
+        let is_addr_live = |index: gimli::DebugAddrIndex<usize>| -> crate::error::Result<bool> {
+            for (executable_data, dwo_data) in &exec_entries {
+                let addr = executable_data
+                    .0
+                    .debug_addr
+                    .get_address(dwo_data.addr_size, dwo_data.addr_base, index)
+                    .map_err(crate::error::Error::from)?;
+                if !is_tombstone(addr, dwo_data.addr_size) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
         };
+
+        // For `.dwp` inputs the shared sections are concatenations of per-CU
+        // contributions, and the CU header's offsets (e.g. abbrev) are relative
+        // to this CU's contribution. Slice each section to this CU's subrange
+        // so the DIE walk resolves abbreviations, location lists,
+        // and range lists correctly (for `.dwo` inputs each subrange is the
+        // whole section and this is a noop).
+        let abbrev_bytes = debug_abbrev.reader().slice();
+        let abbrev_contribution = unit_section_range(
+            cu_index,
+            id,
+            gimli::IndexSectionId::DebugAbbrev,
+            abbrev_bytes.len(),
+        )?;
+        let debug_abbrev =
+            gimli::DebugAbbrev::new(&abbrev_bytes[abbrev_contribution.range()], endian);
+
+        let loc_contribution = unit_section_range(
+            cu_index,
+            id,
+            gimli::IndexSectionId::DebugLoc,
+            data.debug_loc.len(),
+        )?;
+        let loclists_contribution = unit_section_range(
+            cu_index,
+            id,
+            gimli::IndexSectionId::DebugLocLists,
+            data.debug_loclists.len(),
+        )?;
+        let rnglists_contribution = unit_section_range(
+            cu_index,
+            id,
+            gimli::IndexSectionId::DebugRngLists,
+            data.debug_rnglists.len(),
+        )?;
+
+        // `.debug_rnglists` data in the .dwo is self-contained; only the
+        // executable's `.debug_ranges` is needed to construct `RangeLists`.
+        // At most one executable has non-empty `.debug_ranges` here (enforced
+        // above), so use that one. If none do, just take the first one since
+        // it's unused.
+        let ranges_idx = exec_entries
+            .iter()
+            .position(|(exec, _)| !exec.0.ranges.debug_ranges().reader().is_empty())
+            .unwrap_or(0);
+        let ranges_executable_data = &exec_entries[ranges_idx].0;
 
         let gc_result = crate::gc::gc_debug_info(
             gimli::DebugInfo::new(debug_info, endian),
-            *debug_abbrev,
+            debug_abbrev,
             gimli::LocationLists::new(
-                gimli::DebugLoc::from(gimli::EndianSlice::new(&data.debug_loc, endian)),
-                gimli::DebugLocLists::from(gimli::EndianSlice::new(&data.debug_loclists, endian)),
+                gimli::DebugLoc::from(gimli::EndianSlice::new(
+                    &data.debug_loc[loc_contribution.range()],
+                    endian,
+                )),
+                gimli::DebugLocLists::from(gimli::EndianSlice::new(
+                    &data.debug_loclists[loclists_contribution.range()],
+                    endian,
+                )),
             ),
-            gimli::RangeLists::new(executable_data.0.ranges.debug_ranges().clone(), {
+            gimli::RangeLists::new(ranges_executable_data.0.ranges.debug_ranges().clone(), {
                 let relocations = data.session.alloc_relocation(RelocationMap::default());
-                let section = gimli::EndianSlice::new(&data.debug_rnglists, endian);
+                let section = gimli::EndianSlice::new(
+                    &data.debug_rnglists[rnglists_contribution.range()],
+                    endian,
+                );
                 let reader = section;
                 gimli::DebugRngLists::from(Relocate { relocations, section, reader })
             }),
-            addr_resolver,
+            is_addr_live,
             dwo_id,
             has_type_units,
         )?;
@@ -499,147 +638,506 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
         Ok(Some(gc_result))
     }
 
-    fn emit_gc_sections(
-        &mut self,
+    /// Run garbage collection for a single unit. The shared per-input-object
+    /// sections will be emitted once after all units have been GC'd by
+    /// `emit_gc_shared_sections`. Returns the unit's [`crate::gc::GcResult`],
+    /// if any.
+    fn run_unit_gc<R: gimli::Reader>(
+        &self,
+        cu_index: Option<&UnitIndex<R>>,
         id: DwarfObject,
-        encoding: Encoding,
         debug_info: &'input [u8],
-        obj: &mut DwarfPackageObject<'_>,
-        string_table: &mut PackageStringTable,
         debug_abbrev: &gimli::DebugAbbrev<gimli::EndianSlice<'input, RunTimeEndian>>,
         endian: RunTimeEndian,
         has_type_units: bool,
-        has_debug_macro: bool,
-        debug_rnglists: &mut Option<Contribution>,
-        debug_loc: &mut Option<Contribution>,
-        debug_loclists: &mut Option<Contribution>,
-        debug_str_offsets: &mut Option<Contribution>,
-    ) -> Result<Option<&'input [u8]>> {
-        let SessionHolder::GcSession(ref mut data) = self else {
+    ) -> Result<Option<crate::gc::GcResult>> {
+        let SessionHolder::GcSession(ref data) = self else {
             return Ok(None);
         };
+        Self::maybe_gc(data, cu_index, id, debug_info, debug_abbrev, endian, has_type_units)
+    }
 
-        let mut gc_result = Self::maybe_gc(data, id, debug_info, debug_abbrev, endian, has_type_units)?;
+    /// Emit the per-input-object shared sections (`.debug_rnglists`, `.debug_loc`,
+    /// `.debug_loclists`, `.debug_str_offsets`) once, using the GC results of *all* units.
+    ///
+    /// These sections are shared between the units of an input object (in particular, a type unit
+    /// shares them with its compilation unit), so they cannot be emitted inside the per-unit loop.
+    /// Each unit's contribution is rewritten independently using that unit's GC result and its own
+    /// sub-range of the section (per-CU for `.dwp` inputs; the whole section for `.dwo` inputs),
+    /// so CU-relative references and referenced-index sets from different units never bleed
+    /// together.
+    ///
+    /// Two regimes, selected by `has_type_units` (which disables list pruning in `gc.rs`):
+    ///
+    /// - **No type units**: list pruning is possible, so the rewritten bytes may shrink. Each CU's
+    ///   sub-range is rewritten, the chunks are concatenated, and per-unit contributions are
+    ///   recomputed from the actual chunk sizes. The returned map supplies these contributions
+    ///   directly (the caller must not run the input-index-derived adjustors for these sections).
+    /// - **Type units present**: pruning is disabled, so only size-preserving expression patching
+    ///   happens. Each CU's sub-range is patched in place, the byte layout is unchanged, and the
+    ///   base contributions are stored in `debug_*`. The caller runs the normal adjustors and this
+    ///   method returns `None`.
+    ///
+    /// For a non-GC session this is a no-op returning `None` (the shared sections were already
+    /// appended in the section loop).
+    fn emit_gc_shared_sections<R: gimli::Reader>(
+        &self,
+        cu_index: Option<&UnitIndex<R>>,
+        pending: &mut [PendingEntry],
+        encoding: Encoding,
+        endian: RunTimeEndian,
+        has_type_units: bool,
+        has_debug_macro: bool,
+        obj: &mut DwarfPackageObject<'_>,
+        string_table: &mut PackageStringTable,
+        debug_loc: &mut Option<Contribution>,
+        debug_loclists: &mut Option<Contribution>,
+        debug_rnglists: &mut Option<Contribution>,
+        debug_str_offsets: &mut Option<Contribution>,
+    ) -> Result<bool> {
+        let SessionHolder::GcSession(ref data) = self else {
+            return Ok(false);
+        };
 
-        macro_rules! update {
-            ($target:ident += $source:expr) => {
-                if let Some(other) = $source {
-                    let contribution = $target.get_or_insert(Contribution { size: 0, ..other });
-                    contribution.size += other.size;
-                }
-                debug!(?$target);
-            };
-        }
-
-        if !data.debug_rnglists.is_empty() {
-            let data = if let Some(ref gc) = gc_result {
-                if let Some(ref referenced) =
-                    gc.rewritten.as_ref().and(gc.referenced_rnglists.as_ref())
-                {
-                    let dwo_id = match id {
-                        DwarfObject::Compilation(dwo_id) => dwo_id,
-                        _ => unreachable!(),
-                    };
-                    let (executable_data, dwo_data) =
-                        data.gc_data.get_data_for_dwo(dwo_id).unwrap();
-                    let addr_resolver = |index| {
-                        executable_data
-                            .0
-                            .debug_addr
-                            .get_address(dwo_data.addr_size, dwo_data.addr_base, index)
-                            .map_err(Into::into)
-                    };
-                    let rewritten = crate::gc::rewrite_rnglists(
-                        gimli::EndianSlice::new(&data.debug_rnglists, endian),
-                        referenced,
-                        &addr_resolver,
-                        dwo_id,
-                    )?;
-                    match rewritten {
-                        Some(v) => data.session.alloc_data(v),
-                        None => &data.debug_rnglists,
+        if has_type_units {
+            // Pruning is disabled. Patch CU-relative references in place, preserving the
+            // exact byte layout so input-index-derived contributions remain valid.
+            let str_offsets_whole = data.debug_str_offsets.reader().slice();
+            let mut unit_has_loc: Vec<Contribution> = Vec::with_capacity(pending.len());
+            let mut unit_has_loclists: Vec<Contribution> = Vec::with_capacity(pending.len());
+            let mut unit_has_str_off: Vec<Contribution> = Vec::with_capacity(pending.len());
+            match cu_index {
+                None => {
+                    for _ in pending.iter() {
+                        unit_has_loc.push(Contribution::from((0, data.debug_loc.len())));
+                        unit_has_loclists.push(Contribution::from((0, data.debug_loclists.len())));
+                        unit_has_str_off.push(Contribution::from((0, str_offsets_whole.len())));
                     }
-                } else {
-                    &data.debug_rnglists
                 }
-            } else {
-                &data.debug_rnglists
-            };
-            update!(debug_rnglists += obj.append_to_debug_rnglists(data));
-        }
-        if !data.debug_loc.is_empty() {
-            let data = if let Some(ref gc) = gc_result {
-                if let Some(ref remap) = gc.rewritten.as_ref().and(gc.offset_remap.as_ref()) {
-                    let patched = crate::gc::patch_debug_loc(
-                        gimli::EndianSlice::new(&data.debug_loc, endian),
+                Some(index) => {
+                    for unit in pending.iter() {
+                        let id = unit.entry.id;
+                        let idx = id.index();
+                        let row_id = index.find(idx).ok_or(Error::UnitNotInIndex(idx))?;
+                        let mut loc = Contribution::default();
+                        let mut loclists = Contribution::default();
+                        let mut str_off = Contribution::default();
+                        for section in
+                            index.sections(row_id).map_err(|e| Error::RowNotInIndex(e, row_id))?
+                        {
+                            let r = Contribution::from((section.offset, section.size));
+                            match section.section {
+                                gimli::IndexSectionId::DebugLoc => loc = r,
+                                gimli::IndexSectionId::DebugLocLists => loclists = r,
+                                gimli::IndexSectionId::DebugStrOffsets => str_off = r,
+                                _ => {}
+                            }
+                        }
+                        unit_has_loc.push(loc);
+                        unit_has_loclists.push(loclists);
+                        unit_has_str_off.push(str_off);
+                    }
+                }
+            }
+
+            if !data.debug_loc.is_empty() {
+                let original = &data.debug_loc;
+                let mut buf: Option<Vec<u8>> = None;
+                // Guard against applying two different CUs' remaps to the same byte range,
+                // which corrupts data when cu_index=None gives every CU (0, whole_len).
+                let mut patched_ranges: HashSet<Contribution> = HashSet::new();
+                for (idx, unit) in pending.iter().enumerate() {
+                    let Some(gc) = &unit.gc_result else { continue };
+                    let Some(remap) = gc.rewritten.as_ref().and(gc.offset_remap.as_ref()) else {
+                        continue;
+                    };
+                    let contribution = unit_has_loc[idx];
+                    if contribution.size == 0 {
+                        continue;
+                    }
+                    if !patched_ranges.insert(contribution) {
+                        continue;
+                    }
+                    let bytes = buf.get_or_insert_with(|| original.to_vec());
+                    if let Some(patched) = crate::gc::patch_debug_loc(
+                        gimli::EndianSlice::new(&bytes[contribution.range()], endian),
                         encoding,
                         remap,
+                    )? {
+                        bytes[contribution.range()].copy_from_slice(&patched);
+                    }
+                }
+                *debug_loc = obj.append_to_debug_loc(buf.as_deref().unwrap_or(original));
+            }
+
+            if !data.debug_loclists.is_empty() {
+                let original = &data.debug_loclists;
+                let mut buf: Option<Vec<u8>> = None;
+                let mut patched_ranges: HashSet<Contribution> = HashSet::new();
+                for (idx, unit) in pending.iter().enumerate() {
+                    let Some(gc) = &unit.gc_result else { continue };
+                    let Some(remap) = gc.rewritten.as_ref().and(gc.offset_remap.as_ref()) else {
+                        continue;
+                    };
+                    let contribution = unit_has_loclists[idx];
+                    if contribution.size == 0 {
+                        continue;
+                    }
+                    if !patched_ranges.insert(contribution) {
+                        continue;
+                    }
+                    let bytes = buf.get_or_insert_with(|| original.to_vec());
+                    if let Some(patched) = crate::gc::rewrite_loclists(
+                        gimli::EndianSlice::new(&bytes[contribution.range()], endian),
+                        None,
+                        Some(remap),
+                    )? {
+                        bytes[contribution.range()].copy_from_slice(&patched);
+                    }
+                }
+                *debug_loclists = obj.append_to_debug_loclists(buf.as_deref().unwrap_or(original));
+            }
+
+            // Range lists carry no DIE references and are not pruned when type units are present.
+            if !data.debug_rnglists.is_empty() {
+                *debug_rnglists = obj.append_to_debug_rnglists(&data.debug_rnglists);
+            }
+
+            // String offsets are never pruned here (no type-unit-safe compaction), but each CU's
+            // contribution must still be remapped into the merged string table. Remap per-CU and
+            // write back in place, so multi-CU DWARF 5 inputs (one header per contribution) are
+            // handled correctly while the exact byte layout (and thus the adjustors) is preserved.
+            // Type units share their compilation unit's contribution, so only compilation units
+            // are iterated, remapping each distinct contribution exactly once.
+            if !str_offsets_whole.is_empty() {
+                let mut bytes = str_offsets_whole.to_vec();
+                // Guard against remapping the same byte range twice. A second remap would
+                // treat already-remapped output indices as source indices, corrupting the
+                // table. With cu_index=None every CU gets (0, whole_len), so the first CU's
+                // pass remaps all entries (including those belonging to later CUs) correctly,
+                // and subsequent CUs with the same range are skipped.
+                let mut remapped_ranges: HashSet<Contribution> = HashSet::new();
+                for (idx, unit) in pending.iter().enumerate() {
+                    let DwarfObject::Compilation(_) = unit.entry.id else { continue };
+                    let contribution = unit_has_str_off[idx];
+                    if contribution.size == 0 {
+                        continue;
+                    }
+                    if !remapped_ranges.insert(contribution) {
+                        continue;
+                    }
+                    let sub_str_offsets = gimli::DebugStrOffsets::from(gimli::EndianSlice::new(
+                        &bytes[contribution.range()],
+                        endian,
+                    ));
+                    let remapped = string_table.remap_str_offsets_section(
+                        data.debug_str,
+                        sub_str_offsets,
+                        endian,
+                        encoding,
+                        None,
                     )?;
-                    match patched {
-                        Some(v) => data.session.alloc_data(v),
-                        None => &data.debug_loc,
-                    }
-                } else {
-                    &data.debug_loc
+                    let remapped = remapped.slice();
+                    assert_eq!(
+                        remapped.len(),
+                        contribution.size as usize,
+                        "unpruned str_offsets remap must preserve contribution size"
+                    );
+                    bytes[contribution.range()].copy_from_slice(remapped);
                 }
-            } else {
-                &data.debug_loc
-            };
-            update!(debug_loc += obj.append_to_debug_loc(data));
-        }
-        if !data.debug_loclists.is_empty() {
-            let loclists_slice = gimli::EndianSlice::new(&data.debug_loclists, endian);
-            let data = if let Some(ref gc) = gc_result {
-                let remap = gc.rewritten.as_ref().and(gc.offset_remap.as_ref());
-                if remap.is_some() {
-                    let rewritten =
-                        crate::gc::rewrite_loclists(
-                            loclists_slice,
-                            gc.rewritten.as_ref().and(gc.referenced_loclists.as_ref()),
-                            remap
-                        )?;
-                    match rewritten {
-                        Some(v) => data.session.alloc_data(v),
-                        None => &data.debug_loclists,
-                    }
-                } else {
-                    &data.debug_loclists
-                }
-            } else {
-                &data.debug_loclists
-            };
-            update!(debug_loclists += obj.append_to_debug_loclists(data));
+                *debug_str_offsets = obj.append_to_debug_str_offsets(&bytes);
+            }
+
+            return Ok(false);
         }
 
-        if has_debug_macro {
-            if let Some(ref mut gc) = gc_result {
-                gc.referenced_str_offsets = None;
+        // No type units: list pruning is possible, so rewrite each CU's sub-range and write the
+        // recomputed per-unit contributions directly into each pending entry.
+
+        // Records each unit's `(start, len)` chunk within the freshly appended section directly
+        // into the corresponding `pending` entry. `ranges` entries are `(pending_index, start, len)`.
+        fn record(
+            pending: &mut [PendingEntry],
+            base: Option<Contribution>,
+            ranges: &[(usize, usize, usize)],
+            field: impl Fn(&mut IndexEntry) -> &mut Option<Contribution>,
+        ) {
+            let Some(base) = base else { return };
+            for &(idx, start, len) in ranges {
+                if len > 0 {
+                    *field(&mut pending[idx].entry) = Some(Contribution {
+                        offset: ContributionOffset(base.offset.0 + start as u64),
+                        size: len as u64,
+                    });
+                }
             }
         }
 
-        if !data.debug_str_offsets.reader().is_empty() {
-            let filter = gc_result
-                .as_ref()
-                .and_then(|gc| gc.rewritten.as_ref().and(gc.referenced_str_offsets.as_ref()));
-            let remapped = string_table.remap_str_offsets_section(
-                data.debug_str,
-                data.debug_str_offsets,
-                endian,
-                encoding,
-                filter,
-            )?;
-            update!(debug_str_offsets += obj.append_to_debug_str_offsets(remapped.slice()));
+        // Assembles output bytes from per-unit rewritten chunks (or the original section bytes),
+        // appends to the output object, and records contributions into pending entries.
+        fn assemble_and_record<FA, FF>(
+            pending: &mut [PendingEntry],
+            whole: &[u8],
+            unit_ranges: &[Contribution],
+            modified: Option<Vec<(usize, Vec<u8>)>>,
+            mut append: FA,
+            field: FF,
+        ) where
+            FA: FnMut(&[u8]) -> Option<Contribution>,
+            FF: Fn(&mut IndexEntry) -> &mut Option<Contribution>,
+        {
+            let (base, ranges) = if let Some(modified) = modified {
+                let modified: HashMap<usize, Vec<u8>> = modified.into_iter().collect();
+                let mut bytes = Vec::new();
+                let mut ranges: Vec<(usize, usize, usize)> = Vec::new();
+                for (idx, _) in pending.iter().enumerate() {
+                    let chunk: &[u8] = if let Some(v) = modified.get(&idx) {
+                        v
+                    } else {
+                        &whole[unit_ranges[idx].range()]
+                    };
+                    let start = bytes.len();
+                    bytes.extend_from_slice(chunk);
+                    ranges.push((idx, start, chunk.len()));
+                }
+                (append(&bytes), ranges)
+            } else {
+                let ranges = unit_ranges
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, c)| (idx, c.offset.0 as usize, c.size as usize))
+                    .collect();
+                (append(whole), ranges)
+            };
+            record(pending, base, &ranges, field);
         }
 
-        Ok(gc_result
-            .and_then(|gc| gc.rewritten)
-            .map(|r| data.session.alloc_data(r.into_vec())))
+        // Pre-compute each unit's (offset, size) for all four shared sections in a single
+        // index lookup per unit: one index.find + one sections scan covers all four sections,
+        // rather than four separate unit_section_range calls (each doing their own find + scan).
+        let str_offsets_whole = data.debug_str_offsets.reader().slice();
+        let mut unit_rnglists: Vec<Contribution> = Vec::with_capacity(pending.len());
+        let mut unit_loc: Vec<Contribution> = Vec::with_capacity(pending.len());
+        let mut unit_loclists: Vec<Contribution> = Vec::with_capacity(pending.len());
+        let mut unit_str_offsets: Vec<Contribution> = Vec::with_capacity(pending.len());
+        for unit in pending.iter() {
+            let (rng, loc, loclists, str_off) = match cu_index {
+                None => (
+                    Contribution::from((0, data.debug_rnglists.len())),
+                    Contribution::from((0, data.debug_loc.len())),
+                    Contribution::from((0, data.debug_loclists.len())),
+                    Contribution::from((0, str_offsets_whole.len())),
+                ),
+                Some(index) => {
+                    let id = unit.entry.id;
+                    let idx = id.index();
+                    let row_id = index.find(idx).ok_or(Error::UnitNotInIndex(idx))?;
+                    let mut rng = Contribution::default();
+                    let mut loc = Contribution::default();
+                    let mut loclists = Contribution::default();
+                    let mut str_off = Contribution::default();
+                    for section in
+                        index.sections(row_id).map_err(|e| Error::RowNotInIndex(e, row_id))?
+                    {
+                        let r = Contribution::from((section.offset, section.size));
+                        match section.section {
+                            gimli::IndexSectionId::DebugRngLists => rng = r,
+                            gimli::IndexSectionId::DebugLoc => loc = r,
+                            gimli::IndexSectionId::DebugLocLists => loclists = r,
+                            gimli::IndexSectionId::DebugStrOffsets => str_off = r,
+                            _ => {}
+                        }
+                    }
+                    (rng, loc, loclists, str_off)
+                }
+            };
+            unit_rnglists.push(rng);
+            unit_loc.push(loc);
+            unit_loclists.push(loclists);
+            unit_str_offsets.push(str_off);
+        }
+
+        if !data.debug_rnglists.is_empty() {
+            let whole = &data.debug_rnglists;
+            // Collect only the units whose rnglists were actually rewritten. In the common case
+            // (no rewriting) this stays None and no extra allocation is needed.
+            let mut modified: Option<Vec<(usize, Vec<u8>)>> = None;
+            for (idx, unit) in pending.iter().enumerate() {
+                let contribution = unit_rnglists[idx];
+                if contribution.size == 0 {
+                    continue;
+                }
+                let Some(gc) = &unit.gc_result else { continue };
+                let Some(referenced) = gc.rewritten.as_ref().and(gc.referenced_rnglists.as_ref())
+                else {
+                    continue;
+                };
+                let DwarfObject::Compilation(dwo_id) = unit.entry.id else {
+                    unreachable!("rnglists referenced set is only set for compilation units")
+                };
+                let Some(exec_entries) = data.gc_data.get_data_for_dwo(dwo_id) else {
+                    continue;
+                };
+                let is_addr_live =
+                    |index: gimli::DebugAddrIndex<usize>| -> crate::error::Result<bool> {
+                        for (executable_data, dwo_data) in &exec_entries {
+                            let addr = executable_data
+                                .0
+                                .debug_addr
+                                .get_address(dwo_data.addr_size, dwo_data.addr_base, index)
+                                .map_err(crate::error::Error::from)?;
+                            if !is_tombstone(addr, dwo_data.addr_size) {
+                                return Ok(true);
+                            }
+                        }
+                        Ok(false)
+                    };
+                if let Some(v) = crate::gc::rewrite_rnglists(
+                    gimli::EndianSlice::new(&whole[contribution.range()], endian),
+                    referenced,
+                    &is_addr_live,
+                    dwo_id,
+                )? {
+                    modified.get_or_insert_with(Vec::new).push((idx, v));
+                }
+            }
+            assemble_and_record(
+                pending,
+                whole,
+                &unit_rnglists,
+                modified,
+                |b| obj.append_to_debug_rnglists(b),
+                |e| &mut e.debug_rnglists,
+            );
+        }
+
+        if !data.debug_loc.is_empty() {
+            let whole = &data.debug_loc;
+            let mut modified: Option<Vec<(usize, Vec<u8>)>> = None;
+            for (idx, unit) in pending.iter().enumerate() {
+                let contribution = unit_loc[idx];
+                if contribution.size == 0 {
+                    continue;
+                }
+                let Some(gc) = &unit.gc_result else { continue };
+                let Some(remap) = gc.rewritten.as_ref().and(gc.offset_remap.as_ref()) else {
+                    continue;
+                };
+                if let Some(v) = crate::gc::patch_debug_loc(
+                    gimli::EndianSlice::new(&whole[contribution.range()], endian),
+                    encoding,
+                    remap,
+                )? {
+                    modified.get_or_insert_with(Vec::new).push((idx, v));
+                }
+            }
+            assemble_and_record(
+                pending,
+                whole,
+                &unit_loc,
+                modified,
+                |b| obj.append_to_debug_loc(b),
+                |e| &mut e.debug_loc,
+            );
+        }
+
+        if !data.debug_loclists.is_empty() {
+            let whole = &data.debug_loclists;
+            let mut modified: Option<Vec<(usize, Vec<u8>)>> = None;
+            for (idx, unit) in pending.iter().enumerate() {
+                let contribution = unit_loclists[idx];
+                if contribution.size == 0 {
+                    continue;
+                }
+                let Some(gc) = &unit.gc_result else { continue };
+                let remap = gc.rewritten.as_ref().and(gc.offset_remap.as_ref());
+                if remap.is_some() {
+                    if let Some(v) = crate::gc::rewrite_loclists(
+                        gimli::EndianSlice::new(&whole[contribution.range()], endian),
+                        gc.rewritten.as_ref().and(gc.referenced_loclists.as_ref()),
+                        remap,
+                    )? {
+                        modified.get_or_insert_with(Vec::new).push((idx, v));
+                    }
+                }
+            }
+            assemble_and_record(
+                pending,
+                whole,
+                &unit_loclists,
+                modified,
+                |b| obj.append_to_debug_loclists(b),
+                |e| &mut e.debug_loclists,
+            );
+        }
+
+        if !str_offsets_whole.is_empty() {
+            // Count how many pending units share each contribution range. When cu_index=None
+            // every unit gets (0, whole_len), so all CUs share one range. In that case the
+            // per-CU strx filter cannot be applied safely: the filter indices are 0-based
+            // within each CU's own sub-table, but the slice starts at offset 0 of the
+            // full section (i.e. the first CU's territory). Use filter=None for any range
+            // that is shared, preserving all entries.
+            let mut range_count: HashMap<Contribution, usize> = HashMap::new();
+            for &contribution in &unit_str_offsets {
+                if contribution.size > 0 {
+                    *range_count.entry(contribution).or_insert(0) += 1;
+                }
+            }
+
+            let mut bytes = Vec::new();
+            let mut ranges = Vec::new();
+            // Cache contribution → (start, len) in `bytes` so units sharing a range
+            // reuse the same remapped bytes rather than re-remapping (which would be
+            // wrong for per-CU filters and wasteful even for filter=None).
+            let mut range_cache: HashMap<Contribution, (usize, usize)> = HashMap::new();
+            for (idx, unit) in pending.iter().enumerate() {
+                let contribution = unit_str_offsets[idx];
+                if contribution.size == 0 {
+                    continue;
+                }
+                if let Some(&(start, len)) = range_cache.get(&contribution) {
+                    ranges.push((idx, start, len));
+                    continue;
+                }
+                // A `.debug_macro` section indexes strings by `strx`, so the offset table cannot
+                // be compacted even when DIEs are removed. Likewise, when this contribution range
+                // is shared by multiple units (cu_index=None, multi-CU .dwo), per-CU filtering
+                // cannot be applied correctly.
+                let filter = if has_debug_macro
+                    || range_count.get(&contribution).copied().unwrap_or(0) > 1
+                {
+                    None
+                } else {
+                    unit.gc_result.as_ref().and_then(|gc| {
+                        gc.rewritten.as_ref().and(gc.referenced_str_offsets.as_ref())
+                    })
+                };
+                let sub_str_offsets = gimli::DebugStrOffsets::from(gimli::EndianSlice::new(
+                    &str_offsets_whole[contribution.range()],
+                    endian,
+                ));
+                let remapped = string_table.remap_str_offsets_section(
+                    data.debug_str,
+                    sub_str_offsets,
+                    endian,
+                    encoding,
+                    filter,
+                )?;
+                let start = bytes.len();
+                bytes.extend_from_slice(remapped.slice());
+                let len = bytes.len() - start;
+                range_cache.insert(contribution, (start, len));
+                ranges.push((idx, start, len));
+            }
+            let base = obj.append_to_debug_str_offsets(&bytes);
+            record(pending, base, &ranges, |e| &mut e.debug_str_offsets);
+        }
+
+        Ok(true)
     }
 
-    pub(crate) fn new_gc(
-        sess: &'session S,
-        gc_data: &'gc GarbageCollectionData<'session>,
-    ) -> Self {
+    pub(crate) fn new_gc(sess: &'session S, gc_data: &'gc GarbageCollectionData<'session>) -> Self {
         SessionHolder::GcSession(GcSessionData {
             session: sess,
             gc_data,
@@ -851,6 +1349,11 @@ impl<'file> InProgressDwarfPackage<'file> {
         let mut seen_debug_info = false;
         let mut seen_debug_types = false;
 
+        // Pass 1: GC each unit and collect its non-shared contributions. The shared sections are
+        // per-input-object (a type unit shares them with its compilation unit), so they are
+        // emitted once, after this loop, using every unit's GC result.
+        let mut pending: Vec<PendingEntry> = Vec::new();
+
         for section in input.sections() {
             let data;
             let mut iter = match section.name() {
@@ -932,62 +1435,55 @@ impl<'file> InProgressDwarfPackage<'file> {
                     .map_err(Error::DecompressData)?
                     .ok_or(Error::EmptyUnit(id.index()))?;
 
-                let data = sess
-                    .emit_gc_sections(
-                        id,
-                        encoding,
-                        data,
-                        &mut self.obj,
-                        &mut self.string_table,
-                        &debug_abbrev_section,
-                        self.endian,
-                        has_type_units,
-                        debug_macro.is_some(),
-                        &mut debug_rnglists,
-                        &mut debug_loc,
-                        &mut debug_loclists,
-                        &mut debug_str_offsets,
-                    )?
-                    .unwrap_or(data);
+                let gc_result = sess.run_unit_gc(
+                    cu_index.as_ref(),
+                    id,
+                    data,
+                    &debug_abbrev_section,
+                    self.endian,
+                    has_type_units,
+                )?;
+
+                // Use the rewritten `.debug_info` bytes if GC removed any DIEs.
+                let debug_info_data = match gc_result.as_ref().and_then(|gc| gc.rewritten.as_ref())
+                {
+                    Some(rewritten) => rewritten.slice(),
+                    None => data,
+                };
 
                 let (debug_info, debug_types) = match (&iter, id) {
                     (UnitHeaderIterator::DebugTypes(_), DwarfObject::Type(_)) => {
-                        (None, self.obj.append_to_debug_types(data))
+                        (None, self.obj.append_to_debug_types(debug_info_data))
                     }
                     (_, DwarfObject::Compilation(_) | DwarfObject::Type(_)) => {
-                        (self.obj.append_to_debug_info(data), None)
+                        (self.obj.append_to_debug_info(debug_info_data), None)
                     }
                 };
 
+                // Non-shared sections are adjusted here, in unit order. The shared sections
+                // (loc, loclists, rnglists, str_offsets) are handled after this loop.
                 let debug_abbrev = abbrev_adjustor(id, debug_abbrev)?;
                 let debug_line = line_adjustor(id, debug_line)?;
-                let debug_loc = loc_adjustor(id, debug_loc)?;
-                let debug_loclists = loclists_adjustor(id, debug_loclists)?;
-                let debug_rnglists = rnglists_adjustor(id, debug_rnglists)?;
-                let debug_str_offsets = str_offsets_adjustor(id, debug_str_offsets)?;
                 let debug_macinfo = macinfo_adjustor(id, debug_macinfo)?;
                 let debug_macro = macro_adjustor(id, debug_macro)?;
 
-                let entry = IndexEntry {
-                    encoding,
-                    id,
-                    debug_info,
-                    debug_types,
-                    debug_abbrev,
-                    debug_line,
-                    debug_loc,
-                    debug_loclists,
-                    debug_rnglists,
-                    debug_str_offsets,
-                    debug_macinfo,
-                    debug_macro,
-                };
-                debug!(?entry);
-
-                match id {
-                    DwarfObject::Compilation(_) => self.cu_index_entries.push(entry),
-                    DwarfObject::Type(_) => self.tu_index_entries.push(entry),
-                }
+                pending.push(PendingEntry {
+                    entry: IndexEntry {
+                        encoding,
+                        id,
+                        debug_info,
+                        debug_types,
+                        debug_abbrev,
+                        debug_line,
+                        debug_loc: None,
+                        debug_loclists: None,
+                        debug_rnglists: None,
+                        debug_str_offsets: None,
+                        debug_macinfo,
+                        debug_macro,
+                    },
+                    gc_result,
+                });
                 self.contained_units.insert(id);
             }
         }
@@ -995,6 +1491,43 @@ impl<'file> InProgressDwarfPackage<'file> {
         if !seen_debug_info {
             // Report an error if no `.debug_info` section was found.
             return Err(Error::MissingRequiredSection(".debug_info.dwo"));
+        }
+
+        // Emit the shared sections once. When list pruning is possible (no type units), this
+        // writes recomputed per-unit contributions directly into each `pending` entry and returns
+        // `true`; otherwise the shared fields are left as `None` and adjustors fill them below.
+        let shared_populated = sess.emit_gc_shared_sections(
+            cu_index.as_ref(),
+            &mut pending,
+            encoding,
+            self.endian,
+            has_type_units,
+            debug_macro.is_some(),
+            &mut self.obj,
+            &mut self.string_table,
+            &mut debug_loc,
+            &mut debug_loclists,
+            &mut debug_rnglists,
+            &mut debug_str_offsets,
+        )?;
+
+        // Pass 2: build each unit's index entry. The non-shared fields were filled in pass 1.
+        // Fill the four shared fields either from the pending entry (GC path) or from adjustors.
+        for unit in &mut pending {
+            let id = unit.entry.id;
+            if !shared_populated {
+                unit.entry.debug_loc = loc_adjustor(id, debug_loc)?;
+                unit.entry.debug_loclists = loclists_adjustor(id, debug_loclists)?;
+                unit.entry.debug_rnglists = rnglists_adjustor(id, debug_rnglists)?;
+                unit.entry.debug_str_offsets = str_offsets_adjustor(id, debug_str_offsets)?;
+            }
+            let entry = unit.entry;
+            debug!(?entry);
+
+            match id {
+                DwarfObject::Compilation(_) => self.cu_index_entries.push(entry),
+                DwarfObject::Type(_) => self.tu_index_entries.push(entry),
+            }
         }
 
         Ok(())
