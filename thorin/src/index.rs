@@ -79,28 +79,19 @@ impl Contribution {
 
 impl From<(u32, u32)> for Contribution {
     fn from(v: (u32, u32)) -> Contribution {
-        Contribution {
-            offset: ContributionOffset(v.0 as _),
-            size: v.1 as _,
-        }
+        Contribution { offset: ContributionOffset(v.0 as _), size: v.1 as _ }
     }
 }
 
 impl From<(u64, u64)> for Contribution {
     fn from(v: (u64, u64)) -> Contribution {
-        Contribution {
-            offset: ContributionOffset(v.0),
-            size: v.1,
-        }
+        Contribution { offset: ContributionOffset(v.0), size: v.1 }
     }
 }
 
 impl From<(usize, usize)> for Contribution {
     fn from(v: (usize, usize)) -> Contribution {
-        Contribution {
-            offset: ContributionOffset(v.0 as _),
-            size: v.1 as _,
-        }
+        Contribution { offset: ContributionOffset(v.0 as _), size: v.1 as _ }
     }
 }
 

@@ -15,9 +15,7 @@ use crate::{
     error::{Error, Result},
     ext::{CompressedDataRangeExt, EndianityExt, IndexSectionExt, PackageFormatExt},
     gc::is_tombstone,
-    index::{
-        write_index, Bucketable, Contribution, ContributionOffset, IndexEntry,
-    },
+    index::{write_index, Bucketable, Contribution, ContributionOffset, IndexEntry},
     relocate::{Relocate, RelocationMap},
     strings::PackageStringTable,
     GarbageCollectionData, Session,
@@ -273,7 +271,7 @@ fn find_index_section<R: gimli::Reader>(
 /// (no index) the unit's contribution is the whole section, so a `Contribution`
 /// covering the entire section is returned. This mirrors the per-unit slicing
 /// done by `create_contribution_adjustor`, but is used by GC to rewrite each
-/// unit's sub-range of the section independently.
+/// unit's subrange of the section independently.
 fn unit_section_range<R: gimli::Reader>(
     index: Option<&UnitIndex<R>>,
     id: DwarfObject,
@@ -285,17 +283,13 @@ fn unit_section_range<R: gimli::Reader>(
     };
 
     let section = find_index_section(index, id, section_id)?;
-    let contribution = section
-        .map_or(Contribution::default(), |s| {
-            Contribution::from((s.offset as usize, s.size as usize))
-        });
+    let contribution = section.map_or(Contribution::default(), |s| {
+        Contribution::from((s.offset as usize, s.size as usize))
+    });
     // The offset and size come straight from the (possibly malformed) input index, so
     // validate them against the real section length before they are used to slice it.
-    if contribution
-        .offset
-        .0
-        .checked_add(contribution.size)
-        .is_none_or(|end| end > whole_len as u64) {
+    if contribution.offset.0.checked_add(contribution.size).is_none_or(|end| end > whole_len as u64)
+    {
         return Err(Error::ContributionOutOfBounds(contribution, whole_len));
     }
     Ok(contribution)
@@ -531,20 +525,17 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
         };
         debug_assert!(!exec_entries.is_empty());
 
-        // DWARF4 range lists hold raw addresses that live in the executable's
-        // `.debug_ranges`, and we consult a single executable's copy (see
-        // `ranges_executable_data` below). That is the correct union only when at most one
-        // executable actually carries `.debug_ranges` for this `.dwo`: the empty ones
-        // contribute no range liveness, and `.debug_addr` is unioned separately by
-        // `is_addr_live`. If two or more executables supply non-empty `.debug_ranges`, we
-        // would have to union across all of them (as we do for `.debug_addr`), which is not
-        // implemented; rather than risk pruning a range list still live in another
-        // executable, error out.
-        let execs_with_ranges = exec_entries
+        // The DWARF4 `.debug_ranges` contains addresses separately from the
+        // `.debug_addr` section. Rather than implement the `.debug_addr` style
+        // merging we do with is_addr_live below for cases with more than one
+        // executable with `.debug_ranges`, just error out to avoid the
+        // complexity of handling an extreme edge case.
+        if exec_entries
             .iter()
             .filter(|(exec, _)| !exec.0.ranges.debug_ranges().reader().is_empty())
-            .count();
-        if execs_with_ranges > 1 {
+            .count()
+            > 1
+        {
             return Err(crate::error::Error::GcSharedDwarf4Ranges(dwo_id));
         }
 
@@ -659,29 +650,36 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
         Self::maybe_gc(data, cu_index, id, debug_info, debug_abbrev, endian, has_type_units)
     }
 
-    /// Emit the per-input-object shared sections (`.debug_rnglists`, `.debug_loc`,
-    /// `.debug_loclists`, `.debug_str_offsets`) once, using the GC results of *all* units.
+    /// Emit the per-input-object shared sections (`.debug_rnglists`,
+    /// `.debug_loc`, `.debug_loclists`, `.debug_str_offsets`) once,
+    /// using the GC results of *all* units.
     ///
-    /// These sections are shared between the units of an input object (in particular, a type unit
-    /// shares them with its compilation unit), so they cannot be emitted inside the per-unit loop.
-    /// Each unit's contribution is rewritten independently using that unit's GC result and its own
-    /// sub-range of the section (per-CU for `.dwp` inputs; the whole section for `.dwo` inputs),
-    /// so CU-relative references and referenced-index sets from different units never bleed
-    /// together.
+    /// These sections are shared between the units of an input object (in
+    /// particular, a type unit shares them with its compilation unit, and a
+    /// `.dwp` shares them across CUs), so they cannot be emitted inside the
+    /// per-unit loop.
+    /// Each unit's contribution to a shared section is rewritten independently
+    /// using that unit's GC result and its own subrange of the section so
+    /// CU-relative references and referenced-index sets from different units
+    /// never bleed together.
     ///
-    /// Two regimes, selected by `has_type_units` (which disables list pruning in `gc.rs`):
+    /// There are two regimes, selected by `has_type_units`:
     ///
-    /// - **No type units**: list pruning is possible, so the rewritten bytes may shrink. Each CU's
-    ///   sub-range is rewritten, the chunks are concatenated, and per-unit contributions are
-    ///   recomputed from the actual chunk sizes. The returned map supplies these contributions
-    ///   directly (the caller must not run the input-index-derived adjustors for these sections).
-    /// - **Type units present**: pruning is disabled, so only size-preserving expression patching
-    ///   happens. Each CU's sub-range is patched in place, the byte layout is unchanged, and the
-    ///   base contributions are stored in `debug_*`. The caller runs the normal adjustors and this
-    ///   method returns `None`.
+    /// - **No type units**: list pruning is possible, so the rewritten bytes
+    ///   may shrink. Each CU's subrange is rewritten, the chunks are
+    ///   concatenated, and per-unit contributions are recomputed from the
+    ///   actual chunk sizes. The returned map supplies these contributions
+    ///   directly (the caller must not run the input-index-derived adjustors
+    ///   for these sections). This method returns `Ok(true)` indicating that
+    ///   it did the work.
+    /// - **Type units present**: pruning is disabled, so only size-preserving
+    ///   expression patching happens. Each CU's subrange is patched in place,
+    ///   the byte layout is unchanged, and the base contributions are stored in
+    ///   `debug_*`. The caller runs the normal adjustors and this method returns
+    ///   `Ok(false)`.
     ///
-    /// For a non-GC session this is a no-op returning `None` (the shared sections were already
-    /// appended in the section loop).
+    /// For a non-GC session this is a no-op returning `Ok(false)` (the shared
+    /// sections were already appended in the section loop).
     fn emit_gc_shared_sections<R: gimli::Reader>(
         &self,
         cu_index: Option<&UnitIndex<R>>,
@@ -745,19 +743,14 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
             if !data.debug_loc.is_empty() {
                 let original = &data.debug_loc;
                 let mut buf: Option<Vec<u8>> = None;
-                // Guard against applying two different CUs' remaps to the same byte range,
-                // which corrupts data when cu_index=None gives every CU (0, whole_len).
-                let mut patched_ranges: HashSet<Contribution> = HashSet::new();
                 for (idx, unit) in pending.iter().enumerate() {
+                    let DwarfObject::Compilation(_) = unit.entry.id else { continue };
                     let Some(gc) = &unit.gc_result else { continue };
                     let Some(remap) = gc.rewritten.as_ref().and(gc.offset_remap.as_ref()) else {
                         continue;
                     };
                     let contribution = unit_has_loc[idx];
                     if contribution.size == 0 {
-                        continue;
-                    }
-                    if !patched_ranges.insert(contribution) {
                         continue;
                     }
                     let bytes = buf.get_or_insert_with(|| original.to_vec());
@@ -775,17 +768,14 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
             if !data.debug_loclists.is_empty() {
                 let original = &data.debug_loclists;
                 let mut buf: Option<Vec<u8>> = None;
-                let mut patched_ranges: HashSet<Contribution> = HashSet::new();
                 for (idx, unit) in pending.iter().enumerate() {
+                    let DwarfObject::Compilation(_) = unit.entry.id else { continue };
                     let Some(gc) = &unit.gc_result else { continue };
                     let Some(remap) = gc.rewritten.as_ref().and(gc.offset_remap.as_ref()) else {
                         continue;
                     };
                     let contribution = unit_has_loclists[idx];
                     if contribution.size == 0 {
-                        continue;
-                    }
-                    if !patched_ranges.insert(contribution) {
                         continue;
                     }
                     let bytes = buf.get_or_insert_with(|| original.to_vec());
@@ -813,19 +803,10 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
             // are iterated, remapping each distinct contribution exactly once.
             if !str_offsets_whole.is_empty() {
                 let mut bytes = str_offsets_whole.to_vec();
-                // Guard against remapping the same byte range twice. A second remap would
-                // treat already-remapped output indices as source indices, corrupting the
-                // table. With cu_index=None every CU gets (0, whole_len), so the first CU's
-                // pass remaps all entries (including those belonging to later CUs) correctly,
-                // and subsequent CUs with the same range are skipped.
-                let mut remapped_ranges: HashSet<Contribution> = HashSet::new();
                 for (idx, unit) in pending.iter().enumerate() {
                     let DwarfObject::Compilation(_) = unit.entry.id else { continue };
                     let contribution = unit_has_str_off[idx];
                     if contribution.size == 0 {
-                        continue;
-                    }
-                    if !remapped_ranges.insert(contribution) {
                         continue;
                     }
                     let sub_str_offsets = gimli::DebugStrOffsets::from(gimli::EndianSlice::new(
@@ -853,7 +834,7 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
             return Ok(false);
         }
 
-        // No type units: list pruning is possible, so rewrite each CU's sub-range and write the
+        // No type units: list pruning is possible, so rewrite each CU's subrange and write the
         // recomputed per-unit contributions directly into each pending entry.
 
         // Records each unit's `(start, len)` chunk within the freshly appended section directly

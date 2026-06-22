@@ -460,9 +460,7 @@ where
                             let ranges_base = root
                                 .attr_value(gimli::constants::DW_AT_GNU_ranges_base)
                                 .and_then(|v| match v {
-                                    gimli::AttributeValue::DebugRngListsBase(base) => {
-                                        Some(base)
-                                    }
+                                    gimli::AttributeValue::DebugRngListsBase(base) => Some(base),
                                     _ => None,
                                 })
                                 .unwrap_or(gimli::DebugRngListsBase(0));
@@ -477,11 +475,7 @@ where
                             gc_data.put_data_for_dwo(
                                 path,
                                 target,
-                                DwoData {
-                                    addr_size,
-                                    addr_base,
-                                    ranges_base,
-                                },
+                                DwoData { addr_size, addr_base, ranges_base },
                             );
                         }
                     }
