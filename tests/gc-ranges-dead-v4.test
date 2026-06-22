@@ -5,8 +5,9 @@
 # DWARF4 split DWARF (GNU extension). The range data is in the skeleton
 # executable's .debug_ranges section, referenced by sec_offset from the .dwo.
 #
-# Currently broken: classify_root does not yet evaluate DW_AT_ranges with
-# DW_FORM_sec_offset; it conservatively treats such DIEs as live.
+# The skeleton sets DW_AT_GNU_ranges_base, so the .dwo's sec_offsets are relative
+# to that base: GC must add ranges_base before reading .debug_ranges. Without that
+# adjustment the offsets land in leading padding and mixed_func is wrongly dropped.
 
 # Assemble the .dwo (split debug info).
 # RUN: llvm-mc --triple=x86_64-unknown-linux --filetype=obj %p/inputs/gc-ranges-dead-v4-dwo.s -o %t.dwo
