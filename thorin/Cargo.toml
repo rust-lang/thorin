@@ -11,6 +11,10 @@ repository = "https://github.com/rust-lang/thorin"
 version = "0.10.0"
 edition = "2021"
 
+[features]
+default = []
+gc = []
+
 [dependencies]
 itertools = "0.12"
 tracing = "0.1.44"
