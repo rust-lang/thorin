@@ -415,6 +415,7 @@ impl<'file> DwarfPackageObject<'file> {
     }
 }
 
+#[cfg_attr(not(feature = "gc"), allow(dead_code))]
 pub(crate) struct GcSessionData<'input, 'gc, 'session, Sess>
 where
     Sess: Session<RelocationMap>,
@@ -428,6 +429,7 @@ where
     debug_str: gimli::DebugStr<gimli::EndianSlice<'input, RunTimeEndian>>,
 }
 
+#[cfg_attr(not(feature = "gc"), allow(dead_code))]
 pub(crate) enum SessionHolder<'input, 'gc, 'session, Sess>
 where
     Sess: Session<RelocationMap>,
@@ -1120,6 +1122,7 @@ impl<'input, 'gc, 'session: 'input, S: Session<RelocationMap>>
         Ok(true)
     }
 
+    #[cfg_attr(not(feature = "gc"), allow(dead_code))]
     pub(crate) fn new_gc(sess: &'session S, gc_data: &'gc GarbageCollectionData<'session>) -> Self {
         SessionHolder::GcSession(GcSessionData {
             session: sess,

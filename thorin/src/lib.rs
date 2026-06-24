@@ -8,7 +8,9 @@ use std::{
     rc::Rc,
 };
 
-use gimli::{EndianSlice, Reader, UnitType};
+use gimli::{EndianSlice, Reader};
+#[cfg(feature = "gc")]
+use gimli::UnitType;
 use hashbrown::HashMap;
 use object::{write::Object as WritableObject, FileKind, Object, ObjectSection};
 use tracing::{debug, trace};
@@ -23,6 +25,11 @@ use crate::{
 
 mod error;
 mod ext;
+#[cfg(feature = "gc")]
+#[path = "gc.rs"]
+pub(crate) mod gc;
+#[cfg(not(feature = "gc"))]
+#[path = "nogc.rs"]
 pub(crate) mod gc;
 mod index;
 mod package;
@@ -60,22 +67,26 @@ pub trait Session<Relocations> {
     fn read_input<'session>(&'session self, path: &Path) -> std::io::Result<&'session [u8]>;
 }
 
+#[cfg_attr(not(feature = "gc"), allow(dead_code))]
 struct ExecutableData<'session>(
     Rc<gimli::Dwarf<Relocate<'session, gimli::EndianSlice<'session, gimli::RunTimeEndian>>>>,
 );
 
+#[cfg_attr(not(feature = "gc"), allow(dead_code))]
 struct DwoData {
     addr_size: u8,
     addr_base: gimli::DebugAddrBase<usize>,
     ranges_base: gimli::DebugRngListsBase<usize>,
 }
 
+#[cfg_attr(not(feature = "gc"), allow(dead_code))]
 #[derive(Default)]
 struct GarbageCollectionData<'session> {
     executable_data: HashMap<PathBuf, ExecutableData<'session>>,
     dwo_data: HashMap<DwoId, Vec<(PathBuf, DwoData)>>,
 }
 
+#[cfg_attr(not(feature = "gc"), allow(dead_code))]
 impl<'session> GarbageCollectionData<'session> {
     fn put_data_for_executable(&mut self, path: &Path, data: ExecutableData<'session>) {
         self.executable_data.insert(path.to_path_buf(), data);
@@ -162,6 +173,7 @@ impl MissingReferencedObjectBehaviour {
 /// `finish`.
 pub struct DwarfPackage<'output, 'session: 'output, Sess: Session<RelocationMap>> {
     sess: &'session Sess,
+    #[cfg(feature = "gc")]
     gc_data: Option<GarbageCollectionData<'session>>,
     maybe_in_progress: Option<InProgressDwarfPackage<'output>>,
     targets: HashSet<DwarfObject>,
@@ -185,7 +197,13 @@ where
 {
     /// Create a new `DwarfPackage` with the provided `Session` implementation.
     pub fn new(sess: &'session Sess) -> Self {
-        Self { sess, gc_data: None, maybe_in_progress: None, targets: HashSet::new() }
+        Self {
+            sess,
+            #[cfg(feature = "gc")]
+            gc_data: None,
+            maybe_in_progress: None,
+            targets: HashSet::new(),
+        }
     }
 
     /// Add an input object to the in-progress package.
@@ -387,6 +405,7 @@ where
         }
     }
 
+    #[cfg(feature = "gc")]
     #[tracing::instrument(level = "trace")]
     pub fn preprocess_gc_executable(&mut self, path: &Path) -> Result<()> {
         let dwarf = Rc::new(dwarf_from_executable(self.sess, path)?);
@@ -488,6 +507,7 @@ where
     }
 
     /// Add an input object to the in-progress package with GC.
+    #[cfg(feature = "gc")]
     #[tracing::instrument(level = "trace", skip(obj))]
     fn process_gc_input_object<'input>(&mut self, obj: &'input object::File<'input>) -> Result<()> {
         if self.maybe_in_progress.is_none() {
@@ -522,11 +542,13 @@ where
     /// Add an input object to the DWARF package with GC.
     ///
     /// Input object must be an archive or an elf object.
+    #[cfg(feature = "gc")]
     #[tracing::instrument(level = "trace")]
     pub fn add_gc_input_object(&mut self, path: &Path) -> Result<()> {
         self.iterate_object(path, |this, obj| this.process_gc_input_object(obj))
     }
 
+    #[cfg(feature = "gc")]
     #[tracing::instrument(level = "trace")]
     pub fn add_gc_executable(
         &mut self,
