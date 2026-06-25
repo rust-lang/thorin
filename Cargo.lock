@@ -176,8 +176,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "gimli"
-version = "0.33.1"
-source = "git+https://github.com/gimli-rs/gimli?rev=1bb1457480938ea412c7b2a99e07534e7846d1df#1bb1457480938ea412c7b2a99e07534e7846d1df"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1033caf0b349c518623b5396bfb2cf0bddf44f0306d543a250e5743297aafd10"
 dependencies = [
  "fnv",
  "hashbrown 0.17.1",
