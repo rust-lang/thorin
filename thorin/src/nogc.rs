@@ -10,11 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use gimli::{DebugAddrIndex, RunTimeEndian};
 
-use crate::{
-    error::Result,
-    package::DwoId,
-    relocate::Relocate,
-};
+use crate::{error::Result, package::DwoId, relocate::Relocate};
 
 /// Stub result of "garbage-collecting" a `.debug_info.dwo` compilation unit.
 /// All fields are always `None` when the `gc` feature is disabled.
