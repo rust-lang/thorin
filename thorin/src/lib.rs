@@ -8,9 +8,9 @@ use std::{
     rc::Rc,
 };
 
-use gimli::{EndianSlice, Reader};
 #[cfg(feature = "gc")]
 use gimli::UnitType;
+use gimli::{EndianSlice, Reader};
 use hashbrown::HashMap;
 use object::{write::Object as WritableObject, FileKind, Object, ObjectSection};
 use tracing::{debug, trace};
