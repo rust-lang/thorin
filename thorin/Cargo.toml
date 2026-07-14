@@ -16,7 +16,7 @@ default = []
 gc = []
 
 [dependencies]
-itertools = "0.12"
+itertools = "0.15"
 tracing = "0.1.44"
 hashbrown = "0.17.0"
 
