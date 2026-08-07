@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "thorin-dwp"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "gimli",
  "hashbrown",
@@ -453,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "thorin-dwp-bin"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "anyhow",
  "clap",
